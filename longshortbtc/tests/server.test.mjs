@@ -45,6 +45,9 @@ test("dashboard ships a fixed 120-candle chart, default MACD, and one signal ban
   assert.match(page, /LAST 120 CANDLES|\u00daLTIMAS 120 VELAS/);
   assert.match(app, /const VISIBLE_CANDLE_COUNT = 120;/);
   assert.match(app, /macd:true/);
+  assert.match(app, /btc-signal-simulator-v3/);
+  assert.match(app, /leverageReason/);
+  assert.match(app, /estimated fees and slippage on.*notional/);
   assert.doesNotMatch(app, /loadNewsBanner|CANDLE_COUNT_KEY/);
 });
 
@@ -81,5 +84,6 @@ test("klines truncates decimal limits and deduplicates concurrent and cached req
   assert.equal(await cached.text(), "[[1]]");
   assert.equal(calls, 1);
 });
+
 
 

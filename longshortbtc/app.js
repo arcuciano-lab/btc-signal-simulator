@@ -1,7 +1,7 @@
 ﻿import { analyze } from "./strategy.js";
-import { createSimulator, getConsensus, getMarkToMarket, migrateSimulator, processSimulator as updateSimulator, TIMEFRAMES } from "./simulator.js";
-const SIM_KEY = "btc-signal-simulator-v2";
-const LEGACY_SIM_KEY = "btc-signal-simulator-v1";
+import { createSimulator, getConsensus, getMarkToMarket, isValidCandle, migrateSimulator, processSimulator as updateSimulator, TIMEFRAMES } from "./simulator.js";
+const SIM_KEY = "btc-signal-simulator-v3";
+const LEGACY_SIM_KEYS = ["btc-signal-simulator-v2", "btc-signal-simulator-v1"];
 const CHART_KEY = "btc-chart-indicators-v2";
 const VISIBLE_CANDLE_COUNT = 120;
 const MARKET_HISTORY_LIMIT = 320;
@@ -30,17 +30,20 @@ function freshSimulator() {
 }
 
 function loadSimulator() {
-  try {
-    const serialized = localStorage.getItem(SIM_KEY) ?? localStorage.getItem(LEGACY_SIM_KEY);
-    const simulator = migrateSimulator(JSON.parse(serialized));
-    if (serialized) localStorage.setItem(SIM_KEY, JSON.stringify(simulator));
-    return simulator;
-  } catch {}
+  for (const key of [SIM_KEY, ...LEGACY_SIM_KEYS]) {
+    try {
+      const serialized = localStorage.getItem(key);
+      if (!serialized) continue;
+      const simulator = migrateSimulator(JSON.parse(serialized));
+      try { localStorage.setItem(SIM_KEY, JSON.stringify(simulator)); } catch {}
+      return simulator;
+    } catch {}
+  }
   return freshSimulator();
 }
 
 function saveSimulator() {
-  localStorage.setItem(SIM_KEY, JSON.stringify(state.simulator));
+  try { localStorage.setItem(SIM_KEY, JSON.stringify(state.simulator)); } catch {}
 }
 
 async function getCandles(tf, force = false) {
@@ -49,9 +52,10 @@ async function getCandles(tf, force = false) {
   const response = await fetch(`/api/klines?interval=${tf}&limit=${MARKET_HISTORY_LIMIT}`);
   const json = await response.json();
   if (!response.ok) throw new Error(json.error || "No se pudo consultar el mercado");
-  const candles = json
-    .map(k => ({ time:k[0], open:+k[1], high:+k[2], low:+k[3], close:+k[4], volume:+k[5], closeTime:k[6] }))
-    .filter(c => c.closeTime < Date.now());
+  const mapped = json.map(k => ({ time:k[0], open:+k[1], high:+k[2], low:+k[3], close:+k[4], volume:+k[5], closeTime:k[6] }));
+  if (!mapped.length || mapped.some(candle => !isValidCandle(candle))) throw new Error("Invalid or incomplete candle payload");
+  const candles = mapped.filter(candle => candle.closeTime < Date.now());
+  if (!candles.length) throw new Error("No closed candles available");
   state.cache[tf] = { candles, fetchedAt: Date.now() };
   return candles;
 }
@@ -62,14 +66,19 @@ async function load(tf, background = false) {
   if (!background) { $("loading").hidden = false; $("dashboard").hidden = true; }
   $("error").hidden = true;
   try {
-    const candleSets = await Promise.all(TIMEFRAMES.map(t => getCandles(t, background)));
+    const previousSets = TIMEFRAMES.map(t => state.cache[t]?.candles);
+    const settled = await Promise.allSettled(TIMEFRAMES.map(t => getCandles(t, background)));
+    const failed = settled.some(result => result.status === "rejected");
+    if (failed && !previousSets.every(set => Array.isArray(set) && set.length)) throw settled.find(result => result.status === "rejected").reason;
+    const candleSets = failed ? previousSets : settled.map(result => result.value);
+    state.staleData = failed;
     TIMEFRAMES.forEach((t, i) => {
       const rows = analyze(candleSets[i], state.simulator.weights);
       state.rowsByTf[t] = rows;
       state.currentByTf[t] = rows.at(-1);
     });
 
-    processSimulator();
+    if (!state.staleData) processSimulator();
     const activeTf = state.tf;
     const rows = state.rowsByTf[activeTf], current = rows.at(-1);
     const prior24 = rows[Math.max(0, rows.length - ({"5m":288,"15m":96,"1h":24,"4h":6}[activeTf]))];
@@ -144,14 +153,14 @@ function renderSimulator() {
     ["TRADES CERRADOS", sim.trades.length],
     ["TASA DE ACIERTO", sim.trades.length ? `${number(closedWins/sim.trades.length*100,1)}%` : "—"],
     ["AJUSTES APRENDIDOS", sim.learningSteps],
-    ["ESTADO", sim.position ? `EN ${sim.position.side.toUpperCase()}` : sim.pendingReversal ? "REVERSAL PENDING" : "ESPERANDO"]
+    ["ESTADO", state.staleData ? "STALE · TRADING PAUSED" : sim.position ? `EN ${sim.position.side.toUpperCase()}` : sim.pendingReversal ? "REVERSAL PENDING" : "ESPERANDO"]
   ];
   $("simulatorStats").innerHTML = stats.map(([label,value,tone]) => `<div class="stat"><span>${label}</span><strong class="${tone>0?"positive":tone<0?"negative":""}">${value}</strong></div>`).join("");
 
   if (sim.position) {
     const p = sim.position;
     $("openPosition").className = `open-position ${p.side}`;
-    $("openPosition").innerHTML = `<div><span>${p.dataGap?"POSITION PAUSED":"OPEN POSITION"}</span><strong>${p.side.toUpperCase()} · ${money(p.entry)}</strong></div><div><span>REMAINING SIZE</span><strong>${number(p.remainingFraction*100,0)}%${p.partialTaken?" · PARTIAL TAKEN":""}</strong></div><div><span>REALIZED P&amp;L</span><strong class="${p.realizedPnl>=0?"positive":"negative"}">${p.realizedPnl>=0?"+":""}${money(p.realizedPnl,2)}</strong></div><div><span>UNREALIZED P&amp;L</span><strong class="${mark.pnl>=0?"positive":"negative"}">${mark.pnl>=0?"+":""}${money(mark.pnl,2)} · ${number(mark.pct)}%</strong></div>`;
+    $("openPosition").innerHTML = `<div><span>${p.dataGap||state.staleData?"POSITION PAUSED":"OPEN POSITION"}</span><strong>${p.side.toUpperCase()} · ${money(p.entry)} · ${p.leverage}x</strong><small>${state.staleData?"Stale aligned snapshot; no trading":leverageExplanation(p)}</small></div><div><span>REMAINING SIZE</span><strong>${number(p.remainingFraction*100,0)}%${p.partialTaken?" · PARTIAL TAKEN":""}</strong><small>2% budget covers the estimated normal stop; gaps or liquidation can lose more.</small></div><div><span>REALIZED P&amp;L</span><strong class="${p.realizedPnl>=0?"positive":"negative"}">${p.realizedPnl>=0?"+":""}${money(p.realizedPnl,2)}</strong></div><div><span>UNREALIZED P&amp;L</span><strong class="${mark.pnl>=0?"positive":"negative"}">${mark.pnl>=0?"+":""}${money(mark.pnl,2)} · ${number(mark.pct)}% estimated ROI</strong><small>${number(mark.assetReturn)}% asset return · estimated fees and slippage on ${p.leverage}x notional</small></div>`;
   } else {
     $("openPosition").className = "open-position waiting";
     $("openPosition").innerHTML = sim.pendingReversal
@@ -162,8 +171,15 @@ function renderSimulator() {
   $("consensusScore").textContent = `${signal.long} LONG / ${signal.short} SHORT · ${signal.agreement}/4 confirman`;
   $("timeframeSignals").innerHTML = TIMEFRAMES.map(tf => { const c=state.currentByTf[tf]; const lead=c.long>=c.short?"long":"short"; return `<div class="tf-signal ${lead}"><span>${labelTf(tf)}</span><strong>${c.long} L</strong><strong>${c.short} S</strong></div>`; }).join("");
   $("tradeCount").textContent = `${sim.trades.length} trade${sim.trades.length===1?"":"s"}`;
-  $("tradesBody").innerHTML = sim.trades.length ? sim.trades.map(t => `<tr><td>${formatDate(t.entryTime)}</td><td><span class="trade-side ${t.side}">${t.side.toUpperCase()}</span></td><td>${t.longScore} / ${t.shortScore}</td><td>${money(t.entry)} → ${money(t.exit)}${t.partials?.length?`<small>50% partial at ${money(t.partials[0].price)}</small>`:""}</td><td>${formatDate(t.exitTime)}<small>${t.reason}</small></td><td class="${t.pnl>=0?"positive":"negative"}">${t.pnl>=0?"+":""}${money(t.pnl,2)}<small>Realized · ${t.net>=0?"+":""}${number(t.net*100)}%</small></td></tr>`).join("") : `<tr><td colspan="6" class="empty-trades">No trades yet. The simulator is waiting for a confirmed extreme signal.</td></tr>`;
+  $("tradesBody").innerHTML = sim.trades.length ? sim.trades.map(t => `<tr><td>${formatDate(t.entryTime)}</td><td><span class="trade-side ${t.side}">${t.side.toUpperCase()} · ${t.leverage||1}x</span></td><td>${t.longScore} / ${t.shortScore}</td><td>${money(t.entry)} → ${money(t.exit)}${t.partials?.length?`<small>50% partial at ${money(t.partials[0].price)}</small>`:""}</td><td>${formatDate(t.exitTime)}<small>${t.reason}</small></td><td class="${t.pnl>=0?"positive":"negative"}">${t.pnl>=0?"+":""}${money(t.pnl,2)}<small>Realized · ${t.net>=0?"+":""}${number(t.net*100)}% ROI · ${number((t.weightedAssetReturn??t.assetReturn??0)*100)}% asset</small></td></tr>`).join("") : `<tr><td colspan="6" class="empty-trades">No trades yet. The simulator is waiting for a confirmed extreme signal.</td></tr>`;
   $("simUpdated").textContent = `Actualiza cada 60 s · ${new Date().toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"})}`;
+}
+
+function leverageExplanation(position) {
+  const decision = position.leverageDecision;
+  if (!decision?.caps) return position.leverageReason || "Conservative leverage";
+  const circuit = decision.circuitReason ? `; circuit: ${decision.circuitReason}` : "";
+  return `${decision.bindingCap} cap selected ${position.leverage}x${circuit}`;
 }
 
 function formatDate(time) {
@@ -229,8 +245,8 @@ function drawOpenTradeLine(ctx,rows,min,max,W,H,slot){
   const entryIndex=rows.findIndex(r=>r.closeTime>=trade.entryTime),startX=entryIndex>=0?(entryIndex+.5)*slot:0;
   ctx.save();
   ctx.fillStyle="#00f5a00d";ctx.fillRect(startX,Math.min(lineY,targetY),W-startX,Math.abs(targetY-lineY));ctx.fillStyle="#ff35670d";ctx.fillRect(startX,Math.min(lineY,stopY),W-startX,Math.abs(stopY-lineY));
-  drawTradeLevel(ctx,startX,W,targetY,"#00f5a0",`TP +5%${rawTargetY<0?" ↑":rawTargetY>H?" ↓":""} · ${money(target)}`,[3,5],1);
-  drawTradeLevel(ctx,startX,W,stopY,"#ff3567",`SL −2,5%${rawStopY<0?" ↑":rawStopY>H?" ↓":""} · ${money(stop)}`,[3,5],1);
+  drawTradeLevel(ctx,startX,W,targetY,"#00f5a0",`TP +5% asset · est. +${number(4.7*trade.leverage,1)}% ROI${rawTargetY<0?" ↑":rawTargetY>H?" ↓":""}`,[3,5],1);
+  drawTradeLevel(ctx,startX,W,stopY,"#ff3567",`SL −2.5% asset · est. −${number(2.8*trade.leverage,1)}% ROI${rawStopY<0?" ↑":rawStopY>H?" ↓":""}`,[3,5],1);
   drawTradeLevel(ctx,startX,W,lineY,color,`SIM ${trade.side.toUpperCase()} · ENTRADA ${money(trade.entry)}`,[8,5],1.6,true);
   ctx.restore();
 }
@@ -280,3 +296,4 @@ document.querySelectorAll("[data-chart-toggle]").forEach(btn=>btn.addEventListen
 window.addEventListener("resize",()=>{if(state.lastResize)clearTimeout(state.lastResize);state.lastResize=setTimeout(()=>state.lastRows&&drawCharts(state.lastRows.slice(-VISIBLE_CANDLE_COUNT)),150)});
 setInterval(() => load(state.tf, true), 60_000);
 load(state.tf);
+
