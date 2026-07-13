@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=2.0" />
+  <link rel="stylesheet" href="styles.css?v=2.1" />
 </head>
 <body>
   <div class="shell">
@@ -34,6 +34,11 @@
           <small id="priceChange">Cargando mercado…</small>
         </div>
       </section>
+
+      <div class="market-ticker" aria-label="Noticias de Bitcoin y contexto macroeconómico">
+        <div class="ticker-badge"><span></span> MARKET PULSE</div>
+        <div class="ticker-window"><div id="tickerTrack" class="ticker-track"><span class="ticker-loading">Conectando fuentes fiables…</span></div></div>
+      </div>
 
       <nav class="timeframes" aria-label="Temporalidad">
         <button data-tf="5m">5 min</button>
@@ -64,12 +69,8 @@
           </article>
 
           <article class="chart-card">
-            <div class="market-ticker" aria-label="Noticias de Bitcoin y contexto macroeconómico">
-              <div class="ticker-badge"><span></span> MARKET PULSE</div>
-              <div class="ticker-window"><div id="tickerTrack" class="ticker-track"><span class="ticker-loading">Conectando fuentes fiables…</span></div></div>
-            </div>
             <div class="section-head">
-              <div><p class="eyebrow">PRECIO · ÚLTIMAS 120 VELAS</p><h2 id="chartTitle">BTC / USDT</h2></div>
+              <div><p id="chartRangeLabel" class="eyebrow">PRECIO · ÚLTIMAS 48 VELAS</p><h2 id="chartTitle">BTC / USDT</h2></div>
               <div class="chart-legend"><span class="l-price">Velas</span><span class="l-ema50">EMA 50</span><span class="l-ema200">EMA 200</span><span class="l-trade">Trade + TP/SL</span></div>
             </div>
             <div class="chart-controls" aria-label="Indicadores del gráfico">
@@ -77,6 +78,10 @@
               <button type="button" data-chart-toggle="volume">Volumen</button>
               <button type="button" data-chart-toggle="rsi">RSI</button>
               <button type="button" data-chart-toggle="macd">MACD</button>
+              <span class="control-divider"></span><span class="control-label">ZOOM</span>
+              <button type="button" data-candle-count="48">48</button>
+              <button type="button" data-candle-count="72">72</button>
+              <button type="button" data-candle-count="120">120</button>
             </div>
             <canvas id="priceChart" height="290"></canvas>
             <div id="volumePanel" class="indicator-panel"><div class="indicator-label">VOLUMEN</div><canvas id="volumeChart" height="64"></canvas></div>
@@ -120,6 +125,6 @@
 
     <footer><span>Solo análisis educativo. No es asesoramiento financiero.</span><span id="updated">—</span></footer>
   </div>
-  <script type="module" src="app.js?v=2.0"></script>
+  <script type="module" src="app.js?v=2.1"></script>
 </body>
 </html>

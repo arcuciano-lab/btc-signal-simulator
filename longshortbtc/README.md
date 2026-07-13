@@ -20,10 +20,11 @@ npm test
 
 El simulador comienza con 1.000 USDT, guarda el diario de trades en el navegador y ajusta gradualmente los pesos después de cada resultado. Es educativo, no representa una cuenta real ni garantiza resultados futuros.
 
-## Versión 2
+## Versión 2.1
 
 - Velas japonesas con brillo neón, EMA 50/200 y Bandas de Bollinger.
 - Paneles activables de volumen, RSI y MACD.
+- Vista de trading ampliada con 48, 72 o 120 velas, eje de precios y referencias horarias.
 - Posición simulada dibujada con entrada, objetivo, stop y zonas de riesgo/beneficio.
 - Banner de contexto con BTC, WTI, macroeconomía, geopolítica y publicaciones políticas relevantes.
 - Fuentes externas aisladas: si una falla, la señal técnica y el resto del panel continúan funcionando.

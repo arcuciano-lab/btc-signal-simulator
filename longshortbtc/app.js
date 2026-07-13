@@ -4,6 +4,7 @@ const TIMEFRAMES = ["5m", "15m", "1h", "4h"];
 const TF_INFLUENCE = { "5m": .15, "15m": .20, "1h": .30, "4h": .35 };
 const SIM_KEY = "btc-signal-simulator-v1";
 const CHART_KEY = "btc-chart-indicators-v1";
+const CANDLE_COUNT_KEY = "btc-chart-candle-count-v1";
 const $ = id => document.getElementById(id);
 const money = (v, digits = 0) => new Intl.NumberFormat("es-ES", { style:"currency", currency:"USD", minimumFractionDigits:digits, maximumFractionDigits:digits }).format(v);
 const number = (v, d = 2) => new Intl.NumberFormat("es-ES", { minimumFractionDigits:d, maximumFractionDigits:d }).format(v);
@@ -18,6 +19,7 @@ const state = {
   oil: null,
   loading: false,
   chartIndicators: loadChartPreferences(),
+  candleCount: [48,72,120].includes(Number(localStorage.getItem(CANDLE_COUNT_KEY))) ? Number(localStorage.getItem(CANDLE_COUNT_KEY)) : 48,
   simulator: loadSimulator()
 };
 
@@ -201,7 +203,8 @@ function render(rows, current, prior24) {
   $("signalNote").textContent = best >= 75 ? `Esta temporalidad está en zona extrema ${dominant.toLowerCase()}. El simulador solo entrará si existe confluencia en al menos tres temporalidades.` : "Todavía no hay una zona extrema. El simulador permanece paciente y sin posición.";
   $("chartTitle").textContent = `BTC / USDT · ${labelTf(state.tf)}`;
   renderMetrics(current);
-  drawCharts(rows.slice(-120));
+  $("chartRangeLabel").textContent=`PRECIO · ÚLTIMAS ${state.candleCount} VELAS`;
+  drawCharts(rows.slice(-state.candleCount));
   renderSimulator();
   renderNewsTicker();
   $("updated").textContent = `Cierre analizado: ${new Date(current.closeTime).toLocaleString("es-ES", {dateStyle:"short",timeStyle:"short"})}`;
@@ -302,34 +305,40 @@ function drawCharts(rows) {
 
 function drawPriceChart(rows) {
   const surface=setupCanvas("priceChart"); if(!surface)return; const {ctx,W,H}=surface;
+  const axisW=70, plotW=Math.max(100,W-axisW), chartH=H-22;
   const sets=[{v:rows.map(r=>r.ema50),c:"#ffe600",w:1.4},{v:rows.map(r=>r.ema200),c:"#00d9ff",w:1.4}];
   const bandValues=state.chartIndicators.bollinger?rows.flatMap(r=>[r.bbUpper,r.bbLower]):[];
-  const trade=state.simulator.position,tradeLevels=trade?[trade.entry,trade.side==="long"?trade.entry*1.05:trade.entry*.95,trade.side==="long"?trade.entry*.975:trade.entry*1.025]:[];
+  const trade=state.simulator.position,tradeLevels=trade?[trade.entry]:[];
   const all=[...rows.flatMap(r=>[r.high,r.low]),...sets.flatMap(s=>s.v),...bandValues,...tradeLevels].filter(Number.isFinite), rawMin=Math.min(...all), rawMax=Math.max(...all), pad=(rawMax-rawMin)*.08||1, min=rawMin-pad,max=rawMax+pad;
-  ctx.strokeStyle="#202931";ctx.lineWidth=1;for(let i=1;i<4;i++){ctx.beginPath();ctx.moveTo(0,H*i/4);ctx.lineTo(W,H*i/4);ctx.stroke()}
+  ctx.strokeStyle="#182127";ctx.lineWidth=1;
+  for(let i=0;i<=4;i++){const gy=chartH*i/4;ctx.beginPath();ctx.moveTo(0,gy);ctx.lineTo(plotW,gy);ctx.stroke()}
+  for(let i=1;i<7;i++){const gx=plotW*i/7;ctx.beginPath();ctx.moveTo(gx,0);ctx.lineTo(gx,chartH);ctx.stroke()}
+  ctx.font="8px DM Mono, monospace";ctx.textAlign="right";ctx.fillStyle="#71808b";for(let i=0;i<=4;i++){const value=max-(max-min)*i/4;ctx.fillText(money(value),W-5,clamp(chartH*i/4+3,9,chartH-3))}ctx.textAlign="left";
   if(state.chartIndicators.bollinger){
-    const upper=rows.map(r=>r.bbUpper),lower=rows.map(r=>r.bbLower),point=(v,i)=>[i/(rows.length-1)*W,H-(v-min)/(max-min)*H];
+    const upper=rows.map(r=>r.bbUpper),lower=rows.map(r=>r.bbLower),point=(v,i)=>[i/(rows.length-1)*plotW,chartH-(v-min)/(max-min)*chartH];
     ctx.beginPath();upper.forEach((v,i)=>ctx[i?"lineTo":"moveTo"](...point(v,i)));[...lower].reverse().forEach((v,j)=>ctx.lineTo(...point(v,rows.length-1-j)));ctx.closePath();ctx.fillStyle="#8b5cf614";ctx.fill();
-    plotLine(ctx,upper,min,max,W,H,"#a879ff",1,2);plotLine(ctx,lower,min,max,W,H,"#a879ff",1,2);
+    plotLine(ctx,upper,min,max,plotW,chartH,"#278bd8",1,2);plotLine(ctx,lower,min,max,plotW,chartH,"#278bd8",1,2);
   }
-  const slot=W/rows.length,bodyW=clamp(slot*.62,1.5,7),y=v=>H-(v-min)/(max-min)*H;
+  const slot=plotW/rows.length,bodyW=clamp(slot*.68,2.5,13),y=v=>chartH-(v-min)/(max-min)*chartH;
   rows.forEach((r,i)=>{
     const x=(i+.5)*slot,color=r.close>=r.open?"#00f5a0":"#ff3567",openY=y(r.open),closeY=y(r.close),highY=y(r.high),lowY=y(r.low);
     ctx.strokeStyle=color;ctx.lineWidth=1;ctx.shadowColor=color;ctx.shadowBlur=6;ctx.beginPath();ctx.moveTo(x,highY);ctx.lineTo(x,lowY);ctx.stroke();
     const top=Math.min(openY,closeY),height=Math.max(1,Math.abs(closeY-openY));ctx.fillStyle=color;ctx.shadowBlur=9;ctx.fillRect(x-bodyW/2,top,bodyW,height);ctx.shadowBlur=0;
   });
-  sets.forEach(s=>plotLine(ctx,s.v,min,max,W,H,s.c,s.w,s.w>1.5?5:2));
-  drawOpenTradeLine(ctx,rows,min,max,W,H,slot);
+  sets.forEach(s=>plotLine(ctx,s.v,min,max,plotW,chartH,s.c,s.w,s.w>1.5?5:2));
+  const last=rows.at(-1),lastY=y(last.close);ctx.setLineDash([2,3]);ctx.strokeStyle=last.close>=last.open?"#00f5a088":"#ff356788";ctx.beginPath();ctx.moveTo(0,lastY);ctx.lineTo(plotW,lastY);ctx.stroke();ctx.setLineDash([]);const priceLabel=number(last.close,1),labelW=64;ctx.fillStyle=last.close>=last.open?"#00b979":"#d82955";ctx.fillRect(plotW+3,clamp(lastY-9,0,chartH-18),labelW,18);ctx.fillStyle="#fff";ctx.font="500 8px DM Mono, monospace";ctx.fillText(priceLabel,plotW+7,clamp(lastY+3,12,chartH-5));
+  const timeStep=Math.max(1,Math.floor(rows.length/6));ctx.fillStyle="#65727c";ctx.font="8px DM Mono, monospace";rows.forEach((r,i)=>{if(i%timeStep!==0&&i!==rows.length-1)return;const x=(i+.5)*slot;ctx.fillText(new Date(r.closeTime).toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}),clamp(x-16,0,plotW-34),H-5)});
+  drawOpenTradeLine(ctx,rows,min,max,plotW,chartH,slot);
 }
 
 function drawOpenTradeLine(ctx,rows,min,max,W,H,slot){
   const trade=state.simulator.position;if(!trade)return;
-  const color=trade.side==="long"?"#00f5a0":"#ff3567",lineY=H-(trade.entry-min)/(max-min)*H,target=trade.side==="long"?trade.entry*1.05:trade.entry*.95,stop=trade.side==="long"?trade.entry*.975:trade.entry*1.025,targetY=H-(target-min)/(max-min)*H,stopY=H-(stop-min)/(max-min)*H;
+  const color=trade.side==="long"?"#00f5a0":"#ff3567",lineY=H-(trade.entry-min)/(max-min)*H,target=trade.side==="long"?trade.entry*1.05:trade.entry*.95,stop=trade.side==="long"?trade.entry*.975:trade.entry*1.025,rawTargetY=H-(target-min)/(max-min)*H,rawStopY=H-(stop-min)/(max-min)*H,targetY=clamp(rawTargetY,3,H-3),stopY=clamp(rawStopY,3,H-3);
   const entryIndex=rows.findIndex(r=>r.closeTime>=trade.entryTime),startX=entryIndex>=0?(entryIndex+.5)*slot:0;
   ctx.save();
   ctx.fillStyle="#00f5a00d";ctx.fillRect(startX,Math.min(lineY,targetY),W-startX,Math.abs(targetY-lineY));ctx.fillStyle="#ff35670d";ctx.fillRect(startX,Math.min(lineY,stopY),W-startX,Math.abs(stopY-lineY));
-  drawTradeLevel(ctx,startX,W,targetY,"#00f5a0",`TP +5% · ${money(target)}`,[3,5],1);
-  drawTradeLevel(ctx,startX,W,stopY,"#ff3567",`SL −2,5% · ${money(stop)}`,[3,5],1);
+  drawTradeLevel(ctx,startX,W,targetY,"#00f5a0",`TP +5%${rawTargetY<0?" ↑":rawTargetY>H?" ↓":""} · ${money(target)}`,[3,5],1);
+  drawTradeLevel(ctx,startX,W,stopY,"#ff3567",`SL −2,5%${rawStopY<0?" ↑":rawStopY>H?" ↓":""} · ${money(stop)}`,[3,5],1);
   drawTradeLevel(ctx,startX,W,lineY,color,`SIM ${trade.side.toUpperCase()} · ENTRADA ${money(trade.entry)}`,[8,5],1.6,true);
   ctx.restore();
 }
@@ -375,8 +384,10 @@ $("resetSimulator").addEventListener("click", () => {
   load(state.tf);
 });
 
-document.querySelectorAll("[data-chart-toggle]").forEach(btn=>btn.addEventListener("click",()=>{const key=btn.dataset.chartToggle;state.chartIndicators[key]=!state.chartIndicators[key];localStorage.setItem(CHART_KEY,JSON.stringify(state.chartIndicators));if(state.lastRows)drawCharts(state.lastRows.slice(-120))}));
-window.addEventListener("resize",()=>{if(state.lastResize)clearTimeout(state.lastResize);state.lastResize=setTimeout(()=>state.lastRows&&drawCharts(state.lastRows.slice(-120)),150)});
+document.querySelectorAll("[data-chart-toggle]").forEach(btn=>btn.addEventListener("click",()=>{const key=btn.dataset.chartToggle;state.chartIndicators[key]=!state.chartIndicators[key];localStorage.setItem(CHART_KEY,JSON.stringify(state.chartIndicators));if(state.lastRows)drawCharts(state.lastRows.slice(-state.candleCount))}));
+document.querySelectorAll("[data-candle-count]").forEach(btn=>btn.addEventListener("click",()=>{state.candleCount=Number(btn.dataset.candleCount);localStorage.setItem(CANDLE_COUNT_KEY,state.candleCount);document.querySelectorAll("[data-candle-count]").forEach(b=>b.classList.toggle("active",Number(b.dataset.candleCount)===state.candleCount));if(state.lastRows){$("chartRangeLabel").textContent=`PRECIO · ÚLTIMAS ${state.candleCount} VELAS`;drawCharts(state.lastRows.slice(-state.candleCount))}}));
+document.querySelectorAll("[data-candle-count]").forEach(btn=>btn.classList.toggle("active",Number(btn.dataset.candleCount)===state.candleCount));
+window.addEventListener("resize",()=>{if(state.lastResize)clearTimeout(state.lastResize);state.lastResize=setTimeout(()=>state.lastRows&&drawCharts(state.lastRows.slice(-state.candleCount)),150)});
 setInterval(() => load(state.tf, true), 60_000);
 setInterval(loadNewsBanner,10*60_000);
 loadNewsBanner();
