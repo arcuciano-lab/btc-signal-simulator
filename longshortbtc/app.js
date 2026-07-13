@@ -2,8 +2,8 @@
 import { createSimulator, getConsensus, getMarkToMarket, migrateSimulator, processSimulator as updateSimulator, TIMEFRAMES } from "./simulator.js";
 const SIM_KEY = "btc-signal-simulator-v2";
 const LEGACY_SIM_KEY = "btc-signal-simulator-v1";
-const CHART_KEY = "btc-chart-indicators-v1";
-const CANDLE_COUNT_KEY = "btc-chart-candle-count-v1";
+const CHART_KEY = "btc-chart-indicators-v2";
+const VISIBLE_CANDLE_COUNT = 120;
 const MARKET_HISTORY_LIMIT = 320;
 const $ = id => document.getElementById(id);
 const money = (v, digits = 0) => new Intl.NumberFormat("es-ES", { style:"currency", currency:"USD", minimumFractionDigits:digits, maximumFractionDigits:digits }).format(v);
@@ -15,17 +15,14 @@ const state = {
   cache: {},
   currentByTf: {},
   rowsByTf: {},
-  news: [],
-  oil: null,
   loading: false,
   chartIndicators: loadChartPreferences(),
-  candleCount: [48,72,120].includes(Number(localStorage.getItem(CANDLE_COUNT_KEY))) ? Number(localStorage.getItem(CANDLE_COUNT_KEY)) : 48,
   simulator: loadSimulator()
 };
 
 function loadChartPreferences() {
-  try { return { bollinger:true, volume:true, rsi:true, macd:false, ...JSON.parse(localStorage.getItem(CHART_KEY)) }; }
-  catch { return { bollinger:true, volume:true, rsi:true, macd:false }; }
+  try { return { bollinger:true, volume:true, rsi:true, macd:true, ...JSON.parse(localStorage.getItem(CHART_KEY)) }; }
+  catch { return { bollinger:true, volume:true, rsi:true, macd:true }; }
 }
 
 function freshSimulator() {
@@ -77,6 +74,7 @@ async function load(tf, background = false) {
     const rows = state.rowsByTf[activeTf], current = rows.at(-1);
     const prior24 = rows[Math.max(0, rows.length - ({"5m":288,"15m":96,"1h":24,"4h":6}[activeTf]))];
     $("dashboard").hidden = false;
+    $("signalBanner").hidden = false;
     render(rows, current, prior24);
   } catch (error) {
     $("error").textContent = `No se pudieron cargar los datos: ${error.message}. Comprueba tu conexión y vuelve a intentarlo.`;
@@ -110,37 +108,17 @@ function render(rows, current, prior24) {
   $("shortScore").textContent = current.short;
   $("gaugeNeedle").style.left = `${current.long}%`;
   const dominant = current.long >= current.short ? "Long" : "Short", best = Math.max(current.long,current.short);
-  $("verdict").textContent = best >= 75 ? `Zona extrema ${dominant}` : best >= 62 ? `Sesgo ${dominant}` : "Zona neutral";
-  $("confidence").textContent = best >= 75 ? "ZONA DE TRADE" : best >= 62 ? "CONVICCIÓN MEDIA" : "ESPERAR";
-  $("signalNote").textContent = best >= 75 ? `Esta temporalidad está en zona extrema ${dominant.toLowerCase()}. El simulador solo entrará si existe confluencia en al menos tres temporalidades.` : "Todavía no hay una zona extrema. El simulador permanece paciente y sin posición.";
+  const zone = best >= 75 ? "extreme" : best >= 62 ? "biased" : "neutral";
+  $("signalBanner").className = `signal-banner ${zone} ${dominant.toLowerCase()}`;
+  $("verdict").textContent = zone === "extreme" ? `Extreme ${dominant} zone` : zone === "biased" ? `${dominant} bias` : "Neutral zone";
+  $("confidence").textContent = zone === "extreme" ? "TRADE ZONE" : zone === "biased" ? "MEDIUM CONVICTION" : "WAIT";
+  $("signalNote").textContent = zone === "extreme" ? `This timeframe is in the extreme ${dominant.toLowerCase()} zone. The simulator enters only when at least three timeframes agree.` : "No extreme zone yet. The simulator remains patient and out of the market.";
   $("chartTitle").textContent = `BTC / USDT · ${labelTf(state.tf)}`;
   renderMetrics(current);
-  $("chartRangeLabel").textContent=`PRECIO · ÚLTIMAS ${state.candleCount} VELAS`;
-  drawCharts(rows.slice(-state.candleCount));
+  $("chartRangeLabel").textContent=`PRECIO · ÚLTIMAS ${VISIBLE_CANDLE_COUNT} VELAS`;
+  drawCharts(rows.slice(-VISIBLE_CANDLE_COUNT));
   renderSimulator();
-  renderNewsTicker();
   $("updated").textContent = `Cierre analizado: ${new Date(current.closeTime).toLocaleString("es-ES", {dateStyle:"short",timeStyle:"short"})}`;
-}
-
-async function loadNewsBanner(){
-  try{const response=await fetch("/api/news");if(!response.ok)throw new Error("news");const data=await response.json();state.news=Array.isArray(data.items)?data.items:[];state.oil=data.oil||null;renderNewsTicker()}catch{renderNewsTicker()}
-}
-
-function renderNewsTicker(){
-  const track=$("tickerTrack");if(!track)return;
-  const market=state.currentByTf["5m"],signal=Object.keys(state.currentByTf).length===TIMEFRAMES.length?consensus():null;
-  const internal=[];
-  if(market)internal.push({category:"BTC",source:"MERCADO",title:`${money(market.close)} · cierre 5 min`,url:""});
-  if(signal)internal.push({category:"SEÑAL",source:"SISTEMA",title:`Consenso ${signal.long} Long / ${signal.short} Short · ${signal.agreement}/4 temporalidades`,url:""});
-  if(state.oil){const oil=state.oil,sign=oil.changePct>=0?"+":"";internal.push({category:"PETRÓLEO WTI",source:"CL",title:`${number(oil.price,2)} ${oil.currency} · ${sign}${number(oil.changePct)}% · cotización retrasada`,url:oil.url,priority:Math.abs(oil.changePct)>=2?"high":""})}
-  const items=[...internal,...state.news];if(!items.length)return;
-  track.replaceChildren();
-  const appendItems=()=>items.forEach(item=>{
-    const element=document.createElement(item.url?"a":"span");element.className=`ticker-item ${item.priority||""}`;if(item.url){element.href=item.url;element.target="_blank";element.rel="noopener noreferrer"}
-    const tag=document.createElement("strong");tag.textContent=item.category||item.source;const title=document.createElement("span");title.textContent=item.title;element.append(tag,title);track.append(element);
-    const dot=document.createElement("i");dot.setAttribute("aria-hidden","true");track.append(dot);
-  });
-  appendItems();appendItems();track.style.setProperty("--ticker-duration",`${Math.max(42,items.length*7)*2}s`);
 }
 
 function renderMetrics(c) {
@@ -298,11 +276,7 @@ $("resetSimulator").addEventListener("click", () => {
   load(state.tf);
 });
 
-document.querySelectorAll("[data-chart-toggle]").forEach(btn=>btn.addEventListener("click",()=>{const key=btn.dataset.chartToggle;state.chartIndicators[key]=!state.chartIndicators[key];localStorage.setItem(CHART_KEY,JSON.stringify(state.chartIndicators));if(state.lastRows)drawCharts(state.lastRows.slice(-state.candleCount))}));
-document.querySelectorAll("[data-candle-count]").forEach(btn=>btn.addEventListener("click",()=>{state.candleCount=Number(btn.dataset.candleCount);localStorage.setItem(CANDLE_COUNT_KEY,state.candleCount);document.querySelectorAll("[data-candle-count]").forEach(b=>b.classList.toggle("active",Number(b.dataset.candleCount)===state.candleCount));if(state.lastRows){$("chartRangeLabel").textContent=`PRECIO · ÚLTIMAS ${state.candleCount} VELAS`;drawCharts(state.lastRows.slice(-state.candleCount))}}));
-document.querySelectorAll("[data-candle-count]").forEach(btn=>btn.classList.toggle("active",Number(btn.dataset.candleCount)===state.candleCount));
-window.addEventListener("resize",()=>{if(state.lastResize)clearTimeout(state.lastResize);state.lastResize=setTimeout(()=>state.lastRows&&drawCharts(state.lastRows.slice(-state.candleCount)),150)});
+document.querySelectorAll("[data-chart-toggle]").forEach(btn=>btn.addEventListener("click",()=>{const key=btn.dataset.chartToggle;state.chartIndicators[key]=!state.chartIndicators[key];localStorage.setItem(CHART_KEY,JSON.stringify(state.chartIndicators));if(state.lastRows)drawCharts(state.lastRows.slice(-VISIBLE_CANDLE_COUNT))}));
+window.addEventListener("resize",()=>{if(state.lastResize)clearTimeout(state.lastResize);state.lastResize=setTimeout(()=>state.lastRows&&drawCharts(state.lastRows.slice(-VISIBLE_CANDLE_COUNT)),150)});
 setInterval(() => load(state.tf, true), 60_000);
-setInterval(loadNewsBanner,10*60_000);
-loadNewsBanner();
 load(state.tf);

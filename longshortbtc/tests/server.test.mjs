@@ -32,6 +32,22 @@ test("static assets return a stable ETag and support revalidation", async () => 
   assert.equal(await second.text(), "");
 });
 
+test("dashboard ships a fixed 120-candle chart, default MACD, and one signal banner", async () => {
+  const [pageResponse, appResponse] = await Promise.all([
+    originalFetch(`${baseUrl}/`),
+    originalFetch(`${baseUrl}/app.js`)
+  ]);
+  const page = await pageResponse.text();
+  const app = await appResponse.text();
+
+  assert.match(page, /id="signalBanner"/);
+  assert.doesNotMatch(page, /market-ticker|data-candle-count/);
+  assert.match(page, /LAST 120 CANDLES|\u00daLTIMAS 120 VELAS/);
+  assert.match(app, /const VISIBLE_CANDLE_COUNT = 120;/);
+  assert.match(app, /macd:true/);
+  assert.doesNotMatch(app, /loadNewsBanner|CANDLE_COUNT_KEY/);
+});
+
 test("klines validates intervals before contacting the upstream provider", async () => {
   let calls = 0;
   globalThis.fetch = async () => { calls += 1; return new Response("[]"); };
