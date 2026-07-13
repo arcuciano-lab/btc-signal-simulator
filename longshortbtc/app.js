@@ -1,4 +1,4 @@
-import { analyze } from "./strategy.js";
+﻿import { analyze } from "./strategy.js";
 import { createSimulator, getConsensus, getMarkToMarket, processSimulator as updateSimulator, TIMEFRAMES } from "./simulator.js";
 const SIM_KEY = "btc-signal-simulator-v1";
 const CHART_KEY = "btc-chart-indicators-v1";
@@ -137,7 +137,7 @@ function renderNewsTicker(){
     const tag=document.createElement("strong");tag.textContent=item.category||item.source;const title=document.createElement("span");title.textContent=item.title;element.append(tag,title);track.append(element);
     const dot=document.createElement("i");dot.setAttribute("aria-hidden","true");track.append(dot);
   });
-  appendItems();appendItems();track.style.setProperty("--ticker-duration",`${Math.max(42,items.length*7)}s`);
+  appendItems();appendItems();track.style.setProperty("--ticker-duration",`${Math.max(42,items.length*7)*2}s`);
 }
 
 function renderMetrics(c) {
