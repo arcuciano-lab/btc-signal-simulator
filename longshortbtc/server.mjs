@@ -1,4 +1,5 @@
 import http from "node:http";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +16,9 @@ const NEWS_SOURCES = [
   { source:"ONU", category:"PAZ Y SEGURIDAD", url:"https://news.un.org/feed/subscribe/en/news/topic/peace-and-security/feed/rss.xml", limit:4 }
 ];
 let newsCache = { items:[], oil:null, expiresAt:0 };
+let newsRequest = null;
+const klineCache = new Map();
+const klineRequests = new Map();
 const mime = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -23,9 +27,20 @@ const mime = {
   ".svg": "image/svg+xml"
 };
 
-function send(res, status, body, type = "application/json; charset=utf-8") {
-  res.writeHead(status, { "content-type": type, "cache-control": "no-store" });
+function send(res, status, body, type = "application/json; charset=utf-8", cacheControl = "no-store") {
+  res.writeHead(status, { "content-type": type, "cache-control": cacheControl });
   res.end(body);
+}
+
+function sendStatic(req, res, data, type) {
+  const etag = `"${createHash("sha256").update(data).digest("base64url")}"`;
+  const headers = { "content-type": type, "cache-control": "no-cache", etag };
+  if (req.headers["if-none-match"] === etag) {
+    res.writeHead(304, headers);
+    return res.end();
+  }
+  res.writeHead(200, headers);
+  res.end(data);
 }
 
 function decodeXml(value="") {
@@ -71,16 +86,24 @@ async function fetchOil(){
 
 async function fetchNews() {
   if (newsCache.expiresAt>Date.now()) return newsCache;
-  const feedsPromise = Promise.allSettled(NEWS_SOURCES.map(async config=>{
-    const response=await fetch(config.url,{headers:{"user-agent":"BTC-Signal-Barometer/1.0 (+public market dashboard)","accept":"application/rss+xml, application/xml, text/xml"},signal:AbortSignal.timeout(9000)});
-    if(!response.ok)throw new Error(`${config.source}: ${response.status}`);
-    return parseFeed(await response.text(),config);
-  }));
-  const extrasPromise=Promise.allSettled([fetchTrumpPosts(),fetchOil()]);
-  const [results,[trumpResult,oilResult]]=await Promise.all([feedsPromise,extrasPromise]);
-  const items=[...results.flatMap(result=>result.status==="fulfilled"?result.value:[]),...(trumpResult.status==="fulfilled"?trumpResult.value:[])].sort((a,b)=>b.publishedAt-a.publishedAt).slice(0,22);
-  if(items.length||oilResult.status==="fulfilled")newsCache={items:items.length?items:newsCache.items,oil:oilResult.status==="fulfilled"?oilResult.value:newsCache.oil,expiresAt:Date.now()+10*60*1000};
-  return newsCache;
+  if (newsRequest) return newsRequest;
+  newsRequest = (async () => {
+    const feedsPromise = Promise.allSettled(NEWS_SOURCES.map(async config=>{
+      const response=await fetch(config.url,{headers:{"user-agent":"BTC-Signal-Barometer/1.0 (+public market dashboard)","accept":"application/rss+xml, application/xml, text/xml"},signal:AbortSignal.timeout(9000)});
+      if(!response.ok)throw new Error(`${config.source}: ${response.status}`);
+      return parseFeed(await response.text(),config);
+    }));
+    const extrasPromise=Promise.allSettled([fetchTrumpPosts(),fetchOil()]);
+    const [results,[trumpResult,oilResult]]=await Promise.all([feedsPromise,extrasPromise]);
+    const items=[...results.flatMap(result=>result.status==="fulfilled"?result.value:[]),...(trumpResult.status==="fulfilled"?trumpResult.value:[])].sort((a,b)=>b.publishedAt-a.publishedAt).slice(0,22);
+    if(items.length||oilResult.status==="fulfilled")newsCache={items:items.length?items:newsCache.items,oil:oilResult.status==="fulfilled"?oilResult.value:newsCache.oil,expiresAt:Date.now()+10*60*1000};
+    return newsCache;
+  })();
+  try {
+    return await newsRequest;
+  } finally {
+    newsRequest = null;
+  }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -94,13 +117,29 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === "/api/klines") {
       const interval = url.searchParams.get("interval") || "1h";
-      const limit = Math.min(1000, Math.max(250, Number(url.searchParams.get("limit")) || 1000));
+      const requestedLimit = Number(url.searchParams.get("limit"));
+      const limit = Number.isFinite(requestedLimit) && requestedLimit > 0
+        ? Math.min(1000, Math.max(250, Math.trunc(requestedLimit)))
+        : 1000;
       if (!ALLOWED_INTERVALS.has(interval)) return send(res, 400, JSON.stringify({ error: "Temporalidad no válida" }));
 
-      const upstream = `https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`;
-      const response = await fetch(upstream, { signal: AbortSignal.timeout(12000) });
-      if (!response.ok) throw new Error(`Proveedor de datos: ${response.status}`);
-      return send(res, 200, await response.text());
+      const cacheKey = `${interval}:${limit}`;
+      const cached = klineCache.get(cacheKey);
+      if (cached?.expiresAt > Date.now()) return send(res, 200, cached.body);
+      let request = klineRequests.get(cacheKey);
+      if (!request) {
+        const upstream = `https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`;
+        request = fetch(upstream, { signal: AbortSignal.timeout(12000) })
+          .then(async response => {
+            if (!response.ok) throw new Error(`Proveedor de datos: ${response.status}`);
+            return response.text();
+          });
+        klineRequests.set(cacheKey, request);
+        request.finally(() => klineRequests.delete(cacheKey)).catch(() => {});
+      }
+      const body = await request;
+      klineCache.set(cacheKey, { body, expiresAt: Date.now() + 45_000 });
+      return send(res, 200, body);
     }
 
     const requestPath = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
@@ -108,13 +147,24 @@ const server = http.createServer(async (req, res) => {
     const filePath = join(ROOT, safePath);
     if (!filePath.startsWith(ROOT)) return send(res, 403, "Forbidden", "text/plain");
     const data = await readFile(filePath);
-    send(res, 200, data, mime[extname(filePath)] || "application/octet-stream");
+    sendStatic(req, res, data, mime[extname(filePath)] || "application/octet-stream");
   } catch (error) {
     if (error.code === "ENOENT") return send(res, 404, "Not found", "text/plain");
     send(res, 502, JSON.stringify({ error: error.message || "No se pudieron cargar los datos" }));
   }
 });
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`BTC Barometer listo en http://localhost:${PORT}`);
-});
+export function resetServerState() {
+  newsCache = { items:[], oil:null, expiresAt:0 };
+  newsRequest = null;
+  klineCache.clear();
+  klineRequests.clear();
+}
+
+export { server };
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === normalize(process.argv[1])) {
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(`BTC Barometer listo en http://localhost:${PORT}`);
+  });
+}

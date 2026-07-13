@@ -4,22 +4,14 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="description" content="Barómetro técnico de BTC con simulador adaptativo de paper trading." />
-  <title>BTC · Signal Barometer</title>
+  <title>SimpleTrading · BTC Signal Engine</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=2.1" />
+  <link rel="stylesheet" href="styles.css?v=2.3" />
 </head>
 <body>
   <div class="shell">
-    <header>
-      <a class="brand" href="#" aria-label="BTC Signal Barometer">
-        <span class="brand-mark">₿</span>
-        <span>Signal Barometer</span>
-      </a>
-      <div class="live"><span></span> Datos de mercado</div>
-    </header>
-
     <main>
       <section class="hero">
         <div class="hero-copy">
@@ -28,10 +20,16 @@
           <p class="intro">Todo el contexto técnico de Bitcoin convertido en una señal clara. Tú ves el mercado; el simulador espera la oportunidad.</p>
           <div class="hero-pills"><span>4 temporalidades</span><span>6 indicadores</span><span>Paper trading</span></div>
         </div>
-        <div class="market-price">
-          <span>ÚLTIMO CIERRE</span>
-          <strong id="price">—</strong>
-          <small id="priceChange">Cargando mercado…</small>
+        <div class="hero-side">
+          <div class="hero-brand" aria-label="SimpleTrading">
+            <span class="split-btc">₿</span>
+            <div><strong>Simple<span>Trading</span></strong><small><i></i> DATOS DE MERCADO</small></div>
+          </div>
+          <div class="market-price">
+            <span>ÚLTIMO CIERRE</span>
+            <strong id="price">—</strong>
+            <small id="priceChange">Cargando mercado…</small>
+          </div>
         </div>
       </section>
 
@@ -125,6 +123,6 @@
 
     <footer><span>Solo análisis educativo. No es asesoramiento financiero.</span><span id="updated">—</span></footer>
   </div>
-  <script type="module" src="app.js?v=2.1"></script>
+  <script type="module" src="app.js?v=2.3"></script>
 </body>
 </html>

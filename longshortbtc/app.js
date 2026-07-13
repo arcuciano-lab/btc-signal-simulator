@@ -1,10 +1,9 @@
-import { analyze, WEIGHTS } from "./strategy.js";
-
-const TIMEFRAMES = ["5m", "15m", "1h", "4h"];
-const TF_INFLUENCE = { "5m": .15, "15m": .20, "1h": .30, "4h": .35 };
+import { analyze } from "./strategy.js";
+import { createSimulator, getConsensus, getMarkToMarket, processSimulator as updateSimulator, TIMEFRAMES } from "./simulator.js";
 const SIM_KEY = "btc-signal-simulator-v1";
 const CHART_KEY = "btc-chart-indicators-v1";
 const CANDLE_COUNT_KEY = "btc-chart-candle-count-v1";
+const MARKET_HISTORY_LIMIT = 320;
 const $ = id => document.getElementById(id);
 const money = (v, digits = 0) => new Intl.NumberFormat("es-ES", { style:"currency", currency:"USD", minimumFractionDigits:digits, maximumFractionDigits:digits }).format(v);
 const number = (v, d = 2) => new Intl.NumberFormat("es-ES", { minimumFractionDigits:d, maximumFractionDigits:d }).format(v);
@@ -29,16 +28,7 @@ function loadChartPreferences() {
 }
 
 function freshSimulator() {
-  return {
-    initialBank: 1000,
-    bank: 1000,
-    position: null,
-    trades: [],
-    weights: { ...WEIGHTS },
-    learningSteps: 0,
-    lastEntryKey: null,
-    startedAt: Date.now()
-  };
+  return createSimulator();
 }
 
 function loadSimulator() {
@@ -56,7 +46,7 @@ function saveSimulator() {
 async function getCandles(tf, force = false) {
   const cached = state.cache[tf];
   if (!force && cached && Date.now() - cached.fetchedAt < 45_000) return cached.candles;
-  const response = await fetch(`/api/klines?interval=${tf}&limit=1000`);
+  const response = await fetch(`/api/klines?interval=${tf}&limit=${MARKET_HISTORY_LIMIT}`);
   const json = await response.json();
   if (!response.ok) throw new Error(json.error || "No se pudo consultar el mercado");
   const candles = json
@@ -80,8 +70,9 @@ async function load(tf, background = false) {
     });
 
     processSimulator();
-    const rows = state.rowsByTf[tf], current = rows.at(-1);
-    const prior24 = rows[Math.max(0, rows.length - ({"5m":288,"15m":96,"1h":24,"4h":6}[tf]))];
+    const activeTf = state.tf;
+    const rows = state.rowsByTf[activeTf], current = rows.at(-1);
+    const prior24 = rows[Math.max(0, rows.length - ({"5m":288,"15m":96,"1h":24,"4h":6}[activeTf]))];
     $("dashboard").hidden = false;
     render(rows, current, prior24);
   } catch (error) {
@@ -94,98 +85,16 @@ async function load(tf, background = false) {
 }
 
 function consensus() {
-  let long = 0;
-  for (const tf of TIMEFRAMES) long += state.currentByTf[tf].long * TF_INFLUENCE[tf];
-  long = Math.round(long);
-  const short = 100 - long;
-  const side = long >= short ? "long" : "short";
-  const agreement = TIMEFRAMES.filter(tf => state.currentByTf[tf][side] >= 60).length;
-  const parts = {};
-  for (const key of Object.keys(WEIGHTS)) {
-    parts[key] = TIMEFRAMES.reduce((sum, tf) => sum + state.currentByTf[tf].parts[key] * TF_INFLUENCE[tf], 0);
-  }
-  return { long, short, side, agreement, parts };
+  return getConsensus(state.currentByTf);
 }
 
 function processSimulator() {
-  const sim = state.simulator;
-  const signal = consensus();
-  const market = state.currentByTf["5m"];
-
-  if (sim.position) {
-    const p = sim.position;
-    const completed = state.rowsByTf["5m"].filter(c => c.time >= p.entryTime);
-    let exit = null;
-    for (const bar of completed) {
-      const stopPrice = p.side === "long" ? p.entry * .975 : p.entry * 1.025;
-      const targetPrice = p.side === "long" ? p.entry * 1.05 : p.entry * .95;
-      const stopHit = p.side === "long" ? bar.low <= stopPrice : bar.high >= stopPrice;
-      const targetHit = p.side === "long" ? bar.high >= targetPrice : bar.low <= targetPrice;
-      if (stopHit) { exit = { price:stopPrice, time:bar.closeTime, reason:"Stop 2,5%" }; break; }
-      if (targetHit) { exit = { price:targetPrice, time:bar.closeTime, reason:"Objetivo 5%" }; break; }
-    }
-    const opposite = p.side === "long" ? signal.short : signal.long;
-    const oppositeAgreement = TIMEFRAMES.filter(tf => state.currentByTf[tf][p.side === "long" ? "short" : "long"] >= 60).length;
-    if (!exit && opposite >= 62 && oppositeAgreement >= 3) exit = { price:market.close, time:market.closeTime, reason:"Señal contraria" };
-    if (exit) closeTrade(exit);
-  }
-
-  if (!sim.position) {
-    const extreme = Math.max(signal.long, signal.short) >= 75 && signal.agreement >= 3;
-    const entryKey = `${market.closeTime}-${signal.side}`;
-    if (extreme && sim.lastEntryKey !== entryKey) {
-      sim.position = {
-        side: signal.side,
-        entry: market.close,
-        entryTime: market.closeTime,
-        longScore: signal.long,
-        shortScore: signal.short,
-        agreement: signal.agreement,
-        parts: signal.parts,
-        timeframeScores: Object.fromEntries(TIMEFRAMES.map(tf => [tf, { long:state.currentByTf[tf].long, short:state.currentByTf[tf].short }]))
-      };
-      sim.lastEntryKey = entryKey;
-      saveSimulator();
-    }
-  }
-}
-
-function closeTrade(exit) {
-  const sim = state.simulator, p = sim.position;
-  const gross = p.side === "long" ? exit.price / p.entry - 1 : p.entry / exit.price - 1;
-  const net = gross - .002;
-  const pnl = sim.bank * net;
-  sim.bank = Math.max(0, sim.bank + pnl);
-  const trade = { ...p, exit:exit.price, exitTime:exit.time, reason:exit.reason, gross, net, pnl, bankAfter:sim.bank };
-  sim.trades.unshift(trade);
-  sim.trades = sim.trades.slice(0, 200);
-  sim.position = null;
-  learnFromTrade(trade);
+  updateSimulator(state.simulator, state.currentByTf, state.rowsByTf);
   saveSimulator();
 }
 
-function learnFromTrade(trade) {
-  const sim = state.simulator;
-  const outcome = trade.net > 0 ? 1 : -1;
-  const direction = trade.side === "long" ? 1 : -1;
-  const adjusted = {};
-  for (const key of Object.keys(WEIGHTS)) {
-    const alignment = clamp(trade.parts[key] * direction, -1, 1);
-    const factor = 1 + .04 * outcome * alignment;
-    adjusted[key] = clamp(sim.weights[key] * factor, WEIGHTS[key] * .60, WEIGHTS[key] * 1.40);
-  }
-  const total = Object.values(adjusted).reduce((a,b) => a+b, 0);
-  for (const key of Object.keys(adjusted)) sim.weights[key] = adjusted[key] / total * 100;
-  sim.learningSteps += 1;
-}
-
 function markToMarket() {
-  const sim = state.simulator;
-  if (!sim.position || !state.currentByTf["5m"]) return { equity:sim.bank, pnl:0, pct:0 };
-  const price = state.currentByTf["5m"].close;
-  const gross = sim.position.side === "long" ? price / sim.position.entry - 1 : sim.position.entry / price - 1;
-  const net = gross - .002;
-  return { equity:sim.bank*(1+net), pnl:sim.bank*net, pct:net*100 };
+  return getMarkToMarket(state.simulator, state.currentByTf["5m"]);
 }
 
 function render(rows, current, prior24) {
@@ -261,7 +170,7 @@ function renderSimulator() {
   if (sim.position) {
     const p = sim.position;
     $("openPosition").className = `open-position ${p.side}`;
-    $("openPosition").innerHTML = `<div><span>POSICIÓN ABIERTA</span><strong>${p.side.toUpperCase()} · ${money(p.entry)}</strong></div><div><span>FECHA DE ENTRADA</span><strong>${formatDate(p.entryTime)}</strong></div><div><span>SCORE DE ENTRADA</span><strong>${p.longScore} L / ${p.shortScore} S</strong></div><div><span>P&amp;L FLOTANTE</span><strong class="${mark.pnl>=0?"positive":"negative"}">${mark.pnl>=0?"+":""}${money(mark.pnl,2)} · ${number(mark.pct)}%</strong></div>`;
+    $("openPosition").innerHTML = `<div><span>${p.dataGap?"POSICIÓN PAUSADA":"POSICIÓN ABIERTA"}</span><strong>${p.side.toUpperCase()} · ${money(p.entry)}</strong></div><div><span>FECHA DE ENTRADA</span><strong>${formatDate(p.entryTime)}</strong></div><div><span>ESTADO</span><strong>${p.dataGap?"Datos históricos incompletos":`${p.longScore} L / ${p.shortScore} S`}</strong></div><div><span>P&amp;L FLOTANTE</span><strong class="${mark.pnl>=0?"positive":"negative"}">${mark.pnl>=0?"+":""}${money(mark.pnl,2)} · ${number(mark.pct)}%</strong></div>`;
   } else {
     $("openPosition").className = "open-position waiting";
     $("openPosition").innerHTML = `<div><span>SIN POSICIÓN</span><strong>Esperando zona extrema y confirmación 3/4</strong></div>`;
