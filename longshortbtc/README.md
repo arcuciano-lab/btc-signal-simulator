@@ -20,6 +20,14 @@ npm test
 
 El simulador comienza con 1.000 USDT, guarda el diario de trades en el navegador y ajusta gradualmente los pesos después de cada resultado. Es educativo, no representa una cuenta real ni garantiza resultados futuros.
 
+## Versión 2
+
+- Velas japonesas con brillo neón, EMA 50/200 y Bandas de Bollinger.
+- Paneles activables de volumen, RSI y MACD.
+- Posición simulada dibujada con entrada, objetivo, stop y zonas de riesgo/beneficio.
+- Banner de contexto con BTC, WTI, macroeconomía, geopolítica y publicaciones políticas relevantes.
+- Fuentes externas aisladas: si una falla, la señal técnica y el resto del panel continúan funcionando.
+
 ## Publicar gratis en Render
 
 1. Crea un repositorio en GitHub y sube estos archivos a la raíz.

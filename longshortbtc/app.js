@@ -3,6 +3,7 @@ import { analyze, WEIGHTS } from "./strategy.js";
 const TIMEFRAMES = ["5m", "15m", "1h", "4h"];
 const TF_INFLUENCE = { "5m": .15, "15m": .20, "1h": .30, "4h": .35 };
 const SIM_KEY = "btc-signal-simulator-v1";
+const CHART_KEY = "btc-chart-indicators-v1";
 const $ = id => document.getElementById(id);
 const money = (v, digits = 0) => new Intl.NumberFormat("es-ES", { style:"currency", currency:"USD", minimumFractionDigits:digits, maximumFractionDigits:digits }).format(v);
 const number = (v, d = 2) => new Intl.NumberFormat("es-ES", { minimumFractionDigits:d, maximumFractionDigits:d }).format(v);
@@ -13,9 +14,17 @@ const state = {
   cache: {},
   currentByTf: {},
   rowsByTf: {},
+  news: [],
+  oil: null,
   loading: false,
+  chartIndicators: loadChartPreferences(),
   simulator: loadSimulator()
 };
+
+function loadChartPreferences() {
+  try { return { bollinger:true, volume:true, rsi:true, macd:false, ...JSON.parse(localStorage.getItem(CHART_KEY)) }; }
+  catch { return { bollinger:true, volume:true, rsi:true, macd:false }; }
+}
 
 function freshSimulator() {
   return {
@@ -192,9 +201,31 @@ function render(rows, current, prior24) {
   $("signalNote").textContent = best >= 75 ? `Esta temporalidad está en zona extrema ${dominant.toLowerCase()}. El simulador solo entrará si existe confluencia en al menos tres temporalidades.` : "Todavía no hay una zona extrema. El simulador permanece paciente y sin posición.";
   $("chartTitle").textContent = `BTC / USDT · ${labelTf(state.tf)}`;
   renderMetrics(current);
-  drawPriceChart(rows.slice(-120));
+  drawCharts(rows.slice(-120));
   renderSimulator();
+  renderNewsTicker();
   $("updated").textContent = `Cierre analizado: ${new Date(current.closeTime).toLocaleString("es-ES", {dateStyle:"short",timeStyle:"short"})}`;
+}
+
+async function loadNewsBanner(){
+  try{const response=await fetch("/api/news");if(!response.ok)throw new Error("news");const data=await response.json();state.news=Array.isArray(data.items)?data.items:[];state.oil=data.oil||null;renderNewsTicker()}catch{renderNewsTicker()}
+}
+
+function renderNewsTicker(){
+  const track=$("tickerTrack");if(!track)return;
+  const market=state.currentByTf["5m"],signal=Object.keys(state.currentByTf).length===TIMEFRAMES.length?consensus():null;
+  const internal=[];
+  if(market)internal.push({category:"BTC",source:"MERCADO",title:`${money(market.close)} · cierre 5 min`,url:""});
+  if(signal)internal.push({category:"SEÑAL",source:"SISTEMA",title:`Consenso ${signal.long} Long / ${signal.short} Short · ${signal.agreement}/4 temporalidades`,url:""});
+  if(state.oil){const oil=state.oil,sign=oil.changePct>=0?"+":"";internal.push({category:"PETRÓLEO WTI",source:"CL",title:`${number(oil.price,2)} ${oil.currency} · ${sign}${number(oil.changePct)}% · cotización retrasada`,url:oil.url,priority:Math.abs(oil.changePct)>=2?"high":""})}
+  const items=[...internal,...state.news];if(!items.length)return;
+  track.replaceChildren();
+  const appendItems=()=>items.forEach(item=>{
+    const element=document.createElement(item.url?"a":"span");element.className=`ticker-item ${item.priority||""}`;if(item.url){element.href=item.url;element.target="_blank";element.rel="noopener noreferrer"}
+    const tag=document.createElement("strong");tag.textContent=item.category||item.source;const title=document.createElement("span");title.textContent=item.title;element.append(tag,title);track.append(element);
+    const dot=document.createElement("i");dot.setAttribute("aria-hidden","true");track.append(dot);
+  });
+  appendItems();appendItems();track.style.setProperty("--ticker-duration",`${Math.max(42,items.length*7)}s`);
 }
 
 function renderMetrics(c) {
@@ -244,14 +275,87 @@ function formatDate(time) {
   return new Date(time).toLocaleString("es-ES", { day:"2-digit", month:"2-digit", year:"2-digit", hour:"2-digit", minute:"2-digit" });
 }
 
+function setupCanvas(id) {
+  const canvas=$(id), dpr=devicePixelRatio||1, rect=canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  canvas.width=rect.width*dpr; canvas.height=rect.height*dpr;
+  const ctx=canvas.getContext("2d"); ctx.scale(dpr,dpr);
+  return { canvas, ctx, W:rect.width, H:rect.height };
+}
+
+function plotLine(ctx, values, min, max, W, H, color, width=1.4, glow=0) {
+  ctx.beginPath();
+  values.forEach((value,i)=>{if(!Number.isFinite(value))return;const x=i/Math.max(1,values.length-1)*W,y=H-(value-min)/(max-min||1)*H;ctx[i?"lineTo":"moveTo"](x,y)});
+  ctx.strokeStyle=color;ctx.lineWidth=width;ctx.shadowColor=color;ctx.shadowBlur=glow;ctx.stroke();ctx.shadowBlur=0;
+}
+
+function drawCharts(rows) {
+  document.querySelectorAll("[data-chart-toggle]").forEach(btn=>btn.classList.toggle("active",!!state.chartIndicators[btn.dataset.chartToggle]));
+  $("volumePanel").hidden=!state.chartIndicators.volume;
+  $("rsiPanel").hidden=!state.chartIndicators.rsi;
+  $("macdPanel").hidden=!state.chartIndicators.macd;
+  drawPriceChart(rows);
+  if(state.chartIndicators.volume)drawVolumeChart(rows);
+  if(state.chartIndicators.rsi)drawRsiChart(rows);
+  if(state.chartIndicators.macd)drawMacdChart(rows);
+}
+
 function drawPriceChart(rows) {
-  const canvas=$("priceChart"), dpr=devicePixelRatio||1, rect=canvas.getBoundingClientRect();
-  if (!rect.width || !rect.height) return;
-  canvas.width=rect.width*dpr; canvas.height=rect.height*dpr; const ctx=canvas.getContext("2d"); ctx.scale(dpr,dpr);
-  const sets=[{v:rows.map(r=>r.close),c:"#f7fbff",w:2},{v:rows.map(r=>r.ema50),c:"#ffe600",w:1.4},{v:rows.map(r=>r.ema200),c:"#00f5a0",w:1.4}];
-  const all=sets.flatMap(s=>s.v).filter(Number.isFinite), min=Math.min(...all), max=Math.max(...all), pad=(max-min)*.1||1, W=rect.width,H=rect.height;
+  const surface=setupCanvas("priceChart"); if(!surface)return; const {ctx,W,H}=surface;
+  const sets=[{v:rows.map(r=>r.ema50),c:"#ffe600",w:1.4},{v:rows.map(r=>r.ema200),c:"#00d9ff",w:1.4}];
+  const bandValues=state.chartIndicators.bollinger?rows.flatMap(r=>[r.bbUpper,r.bbLower]):[];
+  const trade=state.simulator.position,tradeLevels=trade?[trade.entry,trade.side==="long"?trade.entry*1.05:trade.entry*.95,trade.side==="long"?trade.entry*.975:trade.entry*1.025]:[];
+  const all=[...rows.flatMap(r=>[r.high,r.low]),...sets.flatMap(s=>s.v),...bandValues,...tradeLevels].filter(Number.isFinite), rawMin=Math.min(...all), rawMax=Math.max(...all), pad=(rawMax-rawMin)*.08||1, min=rawMin-pad,max=rawMax+pad;
   ctx.strokeStyle="#202931";ctx.lineWidth=1;for(let i=1;i<4;i++){ctx.beginPath();ctx.moveTo(0,H*i/4);ctx.lineTo(W,H*i/4);ctx.stroke()}
-  sets.forEach(s=>{ctx.beginPath();s.v.forEach((v,i)=>{const x=i/(s.v.length-1)*W,y=H-(v-(min-pad))/(max-min+pad*2)*H;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.strokeStyle=s.c;ctx.lineWidth=s.w;ctx.shadowColor=s.c;ctx.shadowBlur=s.w>1.5?5:2;ctx.stroke();ctx.shadowBlur=0;});
+  if(state.chartIndicators.bollinger){
+    const upper=rows.map(r=>r.bbUpper),lower=rows.map(r=>r.bbLower),point=(v,i)=>[i/(rows.length-1)*W,H-(v-min)/(max-min)*H];
+    ctx.beginPath();upper.forEach((v,i)=>ctx[i?"lineTo":"moveTo"](...point(v,i)));[...lower].reverse().forEach((v,j)=>ctx.lineTo(...point(v,rows.length-1-j)));ctx.closePath();ctx.fillStyle="#8b5cf614";ctx.fill();
+    plotLine(ctx,upper,min,max,W,H,"#a879ff",1,2);plotLine(ctx,lower,min,max,W,H,"#a879ff",1,2);
+  }
+  const slot=W/rows.length,bodyW=clamp(slot*.62,1.5,7),y=v=>H-(v-min)/(max-min)*H;
+  rows.forEach((r,i)=>{
+    const x=(i+.5)*slot,color=r.close>=r.open?"#00f5a0":"#ff3567",openY=y(r.open),closeY=y(r.close),highY=y(r.high),lowY=y(r.low);
+    ctx.strokeStyle=color;ctx.lineWidth=1;ctx.shadowColor=color;ctx.shadowBlur=6;ctx.beginPath();ctx.moveTo(x,highY);ctx.lineTo(x,lowY);ctx.stroke();
+    const top=Math.min(openY,closeY),height=Math.max(1,Math.abs(closeY-openY));ctx.fillStyle=color;ctx.shadowBlur=9;ctx.fillRect(x-bodyW/2,top,bodyW,height);ctx.shadowBlur=0;
+  });
+  sets.forEach(s=>plotLine(ctx,s.v,min,max,W,H,s.c,s.w,s.w>1.5?5:2));
+  drawOpenTradeLine(ctx,rows,min,max,W,H,slot);
+}
+
+function drawOpenTradeLine(ctx,rows,min,max,W,H,slot){
+  const trade=state.simulator.position;if(!trade)return;
+  const color=trade.side==="long"?"#00f5a0":"#ff3567",lineY=H-(trade.entry-min)/(max-min)*H,target=trade.side==="long"?trade.entry*1.05:trade.entry*.95,stop=trade.side==="long"?trade.entry*.975:trade.entry*1.025,targetY=H-(target-min)/(max-min)*H,stopY=H-(stop-min)/(max-min)*H;
+  const entryIndex=rows.findIndex(r=>r.closeTime>=trade.entryTime),startX=entryIndex>=0?(entryIndex+.5)*slot:0;
+  ctx.save();
+  ctx.fillStyle="#00f5a00d";ctx.fillRect(startX,Math.min(lineY,targetY),W-startX,Math.abs(targetY-lineY));ctx.fillStyle="#ff35670d";ctx.fillRect(startX,Math.min(lineY,stopY),W-startX,Math.abs(stopY-lineY));
+  drawTradeLevel(ctx,startX,W,targetY,"#00f5a0",`TP +5% · ${money(target)}`,[3,5],1);
+  drawTradeLevel(ctx,startX,W,stopY,"#ff3567",`SL −2,5% · ${money(stop)}`,[3,5],1);
+  drawTradeLevel(ctx,startX,W,lineY,color,`SIM ${trade.side.toUpperCase()} · ENTRADA ${money(trade.entry)}`,[8,5],1.6,true);
+  ctx.restore();
+}
+
+function drawTradeLevel(ctx,startX,endX,y,color,label,dash,width,boxed=false){
+  ctx.strokeStyle=color;ctx.lineWidth=width;ctx.setLineDash(dash);ctx.shadowColor=color;ctx.shadowBlur=boxed?11:7;ctx.beginPath();ctx.moveTo(startX,y);ctx.lineTo(endX,y);ctx.stroke();ctx.setLineDash([]);ctx.shadowBlur=0;ctx.font=`500 ${boxed?9:8}px DM Mono, monospace`;
+  const labelW=ctx.measureText(label).width+14,labelX=clamp(startX+7,4,endX-labelW-4),labelY=clamp(y-(boxed?22:18),3,Math.max(3,ctx.canvas.getBoundingClientRect().height-18));ctx.fillStyle="#030506e8";ctx.fillRect(labelX,labelY,labelW,16);if(boxed){ctx.strokeStyle=color;ctx.strokeRect(labelX,labelY,labelW,16)}ctx.fillStyle=color;ctx.fillText(label,labelX+7,labelY+11);
+}
+
+function drawVolumeChart(rows){
+  const surface=setupCanvas("volumeChart");if(!surface)return;const{ctx,W,H}=surface,max=Math.max(...rows.map(r=>r.volume))||1,barW=Math.max(1,W/rows.length*.62);
+  rows.forEach((r,i)=>{const h=r.volume/max*(H-4),x=i/rows.length*W;ctx.fillStyle=r.close>=r.open?"#00f5a088":"#ff356788";ctx.fillRect(x,H-h,barW,h)});
+}
+
+function drawRsiChart(rows){
+  const surface=setupCanvas("rsiChart");if(!surface)return;const{ctx,W,H}=surface,values=rows.map(r=>r.rsi);
+  ctx.fillStyle="#ff35670d";ctx.fillRect(0,0,W,H*.30);ctx.fillStyle="#00f5a00d";ctx.fillRect(0,H*.70,W,H*.30);
+  [30,50,70].forEach(v=>{const y=H-v/100*H;ctx.setLineDash(v===50?[2,5]:[5,5]);ctx.strokeStyle=v===50?"#202931":v===70?"#ff356766":"#00f5a066";ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke()});ctx.setLineDash([]);
+  plotLine(ctx,values,0,100,W,H,"#00d9ff",1.5,4);
+}
+
+function drawMacdChart(rows){
+  const surface=setupCanvas("macdChart");if(!surface)return;const{ctx,W,H}=surface,macd=rows.map(r=>r.macd),signal=rows.map(r=>r.macdSignal),hist=rows.map(r=>r.hist),abs=Math.max(...[...macd,...signal,...hist].filter(Number.isFinite).map(Math.abs))||1,min=-abs,max=abs,zero=H/2,barW=Math.max(1,W/rows.length*.58);
+  ctx.strokeStyle="#38434c";ctx.beginPath();ctx.moveTo(0,zero);ctx.lineTo(W,zero);ctx.stroke();
+  hist.forEach((v,i)=>{const y=H-(v-min)/(max-min)*H;ctx.fillStyle=v>=0?"#00f5a077":"#ff356777";ctx.fillRect(i/rows.length*W,Math.min(y,zero),barW,Math.abs(zero-y))});
+  plotLine(ctx,macd,min,max,W,H,"#00d9ff",1.3,3);plotLine(ctx,signal,min,max,W,H,"#ff4fd8",1.2,3);
 }
 
 function labelTf(tf){return ({"5m":"5 min","15m":"15 min","1h":"1 hora","4h":"4 horas"})[tf]}
@@ -271,6 +375,9 @@ $("resetSimulator").addEventListener("click", () => {
   load(state.tf);
 });
 
-window.addEventListener("resize",()=>{if(state.lastResize)clearTimeout(state.lastResize);state.lastResize=setTimeout(()=>state.lastRows&&drawPriceChart(state.lastRows.slice(-120)),150)});
+document.querySelectorAll("[data-chart-toggle]").forEach(btn=>btn.addEventListener("click",()=>{const key=btn.dataset.chartToggle;state.chartIndicators[key]=!state.chartIndicators[key];localStorage.setItem(CHART_KEY,JSON.stringify(state.chartIndicators));if(state.lastRows)drawCharts(state.lastRows.slice(-120))}));
+window.addEventListener("resize",()=>{if(state.lastResize)clearTimeout(state.lastResize);state.lastResize=setTimeout(()=>state.lastRows&&drawCharts(state.lastRows.slice(-120)),150)});
 setInterval(() => load(state.tf, true), 60_000);
+setInterval(loadNewsBanner,10*60_000);
+loadNewsBanner();
 load(state.tf);
