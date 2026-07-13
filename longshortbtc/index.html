@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Barómetro técnico de BTC con simulador adaptativo de paper trading." />
+  <title>BTC · Signal Barometer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css?v=1.3" />
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <a class="brand" href="#" aria-label="BTC Signal Barometer">
+        <span class="brand-mark">₿</span>
+        <span>Signal Barometer</span>
+      </a>
+      <div class="live"><span></span> Datos de mercado</div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div>
+          <p class="eyebrow">BTC / USDT · ANÁLISIS TÉCNICO</p>
+          <h1>Lee el mercado.<br><em>Sin ruido.</em></h1>
+          <p class="intro">Seis métricas, una lectura clara. Compara la presión Long y Short en cada temporalidad.</p>
+        </div>
+        <div class="market-price">
+          <span>ÚLTIMO CIERRE</span>
+          <strong id="price">—</strong>
+          <small id="priceChange">Cargando mercado…</small>
+        </div>
+      </section>
+
+      <nav class="timeframes" aria-label="Temporalidad">
+        <button data-tf="5m">5 min</button>
+        <button data-tf="15m">15 min</button>
+        <button data-tf="1h" class="active">1 hora</button>
+        <button data-tf="4h">4 horas</button>
+      </nav>
+
+      <div id="loading" class="loading"><span></span> Calculando indicadores y consenso multitemporal…</div>
+      <div id="error" class="error" hidden></div>
+
+      <div id="dashboard" hidden>
+        <section class="signal-grid">
+          <article class="barometer-card">
+            <div class="section-head">
+              <div><p class="eyebrow">LECTURA ACTUAL</p><h2 id="verdict">Zona neutral</h2></div>
+              <span class="confidence" id="confidence">—</span>
+            </div>
+            <div class="gauge" aria-label="Barómetro Long Short">
+              <div class="gauge-track"><div id="gaugeNeedle" class="gauge-needle"></div></div>
+              <div class="gauge-labels"><span>SHORT</span><span>NEUTRAL</span><span>LONG</span></div>
+            </div>
+            <div class="score-row">
+              <div class="score short"><span>SHORT</span><strong id="shortScore">—</strong><small>/100</small></div>
+              <div class="score long"><span>LONG</span><strong id="longScore">—</strong><small>/100</small></div>
+            </div>
+            <p id="signalNote" class="signal-note"></p>
+          </article>
+
+          <article class="chart-card">
+            <div class="section-head">
+              <div><p class="eyebrow">PRECIO · ÚLTIMAS 120 VELAS</p><h2 id="chartTitle">BTC / USDT</h2></div>
+              <div class="chart-legend"><span class="l-price">Precio</span><span class="l-ema50">EMA 50</span><span class="l-ema200">EMA 200</span></div>
+            </div>
+            <canvas id="priceChart" height="290"></canvas>
+          </article>
+        </section>
+
+        <section class="metrics-section">
+          <div class="section-title"><div><p class="eyebrow">DESGLOSE DE LA SEÑAL</p><h2>Qué está moviendo la aguja</h2></div><p>El peso indica cuánto influye cada métrica.</p></div>
+          <div id="metrics" class="metrics-grid"></div>
+        </section>
+
+        <section class="backtest-section simulator-section">
+          <div class="section-title simulator-title">
+            <div><p class="eyebrow">PAPER TRADING · APRENDIZAJE LOCAL</p><h2>Simulador de trades</h2></div>
+            <div class="sim-actions"><span id="simUpdated">—</span><button id="resetSimulator" type="button">Reiniciar</button></div>
+          </div>
+          <div id="simulatorStats" class="stats-grid simulator-stats"></div>
+          <div id="openPosition" class="open-position"></div>
+          <div class="tf-consensus">
+            <div class="table-title"><span>CONSENSO MULTITEMPORAL</span><strong id="consensusScore">—</strong></div>
+            <div id="timeframeSignals" class="timeframe-signals"></div>
+          </div>
+          <div class="trades-panel">
+            <div class="table-title"><span>DIARIO DE OPERACIONES</span><strong id="tradeCount">0 trades</strong></div>
+            <div class="table-scroll">
+              <table class="trades-table">
+                <thead><tr><th>Apertura</th><th>Trade</th><th>Score L / S</th><th>Entrada → salida</th><th>Cierre</th><th>Resultado</th></tr></thead>
+                <tbody id="tradesBody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="method">
+            <span class="method-icon">i</span>
+            <p><strong>Reglas del simulador.</strong> Banca inicial 1.000 USDT. Solo abre una posición cuando el score combinado alcanza 75 y al menos 3 de 4 temporalidades confirman la dirección. Stop 2,5%, objetivo 5%, salida por señal contraria y comisión simulada del 0,10% por lado. Tras cada cierre ajusta los pesos un máximo del 4%, dentro de límites seguros. Los datos y el aprendizaje quedan guardados únicamente en este navegador.</p>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <footer><span>Solo análisis educativo. No es asesoramiento financiero.</span><span id="updated">—</span></footer>
+  </div>
+  <script type="module" src="app.js?v=1.3"></script>
+</body>
+</html>
