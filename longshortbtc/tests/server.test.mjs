@@ -1,4 +1,4 @@
-import test, { after, before, beforeEach } from "node:test";
+﻿import test, { after, before, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { resetServerState, server } from "../server.mjs";
@@ -53,7 +53,9 @@ test("klines truncates decimal limits and deduplicates concurrent and cached req
 
   const first = originalFetch(`${baseUrl}/api/klines?interval=5m&limit=300.9`);
   const second = originalFetch(`${baseUrl}/api/klines?interval=5m&limit=300.9`);
-  await new Promise(resolve => setTimeout(resolve, 10));
+  for (let attempt = 0; calls === 0 && attempt < 100; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
   assert.equal(calls, 1);
   release();
   const responses = await Promise.all([first, second]);
@@ -63,3 +65,5 @@ test("klines truncates decimal limits and deduplicates concurrent and cached req
   assert.equal(await cached.text(), "[[1]]");
   assert.equal(calls, 1);
 });
+
+

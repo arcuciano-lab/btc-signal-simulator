@@ -1,122 +1,30 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 import { WEIGHTS } from "../strategy.js";
-import { createSimulator, getMarkToMarket, processSimulator, TIMEFRAMES } from "../simulator.js";
+import { createSimulator, getMarkToMarket, migrateSimulator, processSimulator, SIMULATOR_VERSION, TIMEFRAMES } from "../simulator.js";
+const parts=Object.fromEntries(Object.keys(WEIGHTS).map((k,i)=>[k,i%2?-.35:.45]));
+const rows=c=>({"5m":c?[c]:[]});
+const market=(long=80,close=100,closeTime=1000)=>Object.fromEntries(TIMEFRAMES.map(tf=>[tf,{long,short:100-long,parts,close,closeTime}]));
+const candle=(closeTime,low=99,high=102,time=1001)=>({time,closeTime,low,high});
+test("opens once for an extreme signal",()=>{const s=createSimulator(123);processSimulator(s,market(),rows());const p=s.position;processSimulator(s,market(),rows());assert.equal(s.position,p);assert.equal(p.capital,1000);assert.equal(s.version,SIMULATOR_VERSION)});
+test("takes one profitable 50% partial",()=>{const s=createSimulator();processSimulator(s,market(),rows());processSimulator(s,market(60,104,2000),rows(candle(2000)));assert.equal(s.position.remainingFraction,.5);assert.equal(s.position.partials.length,1);assert.ok(Math.abs(s.position.realizedPnl-19)<1e-9);assert.ok(Math.abs(s.bank-1019)<1e-9);processSimulator(s,market(60,104,3000),rows(candle(3000,103,104,2001)));assert.equal(s.position.partials.length,1)});
+test("losing neutral exit is invalidation",()=>{const s=createSimulator();processSimulator(s,market(),rows());processSimulator(s,market(54,99,2000),rows(candle(2000,98,101)));assert.equal(s.position,null);assert.equal(s.trades[0].reason,"Signal invalidation");assert.ok(s.trades[0].pnl<0)});
+test("learns only on final close",()=>{const s=createSimulator();processSimulator(s,market(),rows());processSimulator(s,market(60,104,2000),rows(candle(2000)));assert.equal(s.learningSteps,0);processSimulator(s,market(54,103,3000),rows(candle(3000,102,104,2001)));assert.equal(s.position,null);assert.equal(s.learningSteps,1);assert.equal(s.trades[0].partials.length,1);assert.equal(s.trades[0].reason,"Neutral profit exit")});
+test("reversal waits for later closed 5m candle",()=>{const s=createSimulator();processSimulator(s,market(),rows());processSimulator(s,market(20,99,2000),rows(candle(2000,98,101)));assert.equal(s.position,null);assert.equal(s.pendingReversal.side,"short");processSimulator(s,market(20,99,2000),rows(candle(2000,98,101)));assert.equal(s.position,null);processSimulator(s,market(20,98,302000),rows(candle(302000,97,99,2001)));assert.equal(s.position.side,"short");assert.equal(s.position.entryTime,302000)});
+test("pending reversal expires without confirmation",()=>{const s=createSimulator();processSimulator(s,market(),rows());processSimulator(s,market(20,99,2000),rows(candle(2000,98,101)));processSimulator(s,market(50,99,302000),rows(candle(302000,98,100,2001)));assert.equal(s.position,null);assert.equal(s.pendingReversal,null)});
+test("stop wins conservatively and fees count once",()=>{const s=createSimulator();processSimulator(s,market(),rows());processSimulator(s,market(70,102,2000),rows(candle(2000,97,106)));assert.equal(s.trades[0].reason,"Stop 2.5%");assert.ok(Math.abs(s.trades[0].pnl+27)<1e-9);assert.ok(Math.abs(s.bank-973)<1e-9)});
+test("mark combines realized and remaining exposure",()=>{const s=createSimulator();processSimulator(s,market(),rows());processSimulator(s,market(60,104,2000),rows(candle(2000)));const m=getMarkToMarket(s,{close:104});assert.ok(Math.abs(m.realizedPnl-19)<1e-9);assert.ok(Math.abs(m.pnl-19)<1e-9);assert.ok(Math.abs(m.equity-1038)<1e-9);assert.ok(Math.abs(s.bank-1019)<1e-9)});
+test("preserves data gap pause",()=>{const s=createSimulator();processSimulator(s,market(),rows());const r=processSimulator(s,market(80,101,20000),rows(candle(20000,99,102,10000)));assert.equal(r.paused,true);assert.equal(s.position.dataGap,true);assert.equal(s.trades.length,0)});
+test("safe legacy and corrupt migration",()=>{const legacy={bank:900,weights:{...WEIGHTS},position:{side:"long",entry:100,entryTime:1,dataGap:true},trades:[]};const m=migrateSimulator(legacy,10);assert.equal(m.version,SIMULATOR_VERSION);assert.equal(m.position.remainingFraction,1);assert.equal(m.position.partialTaken,false);assert.deepEqual(m.position.partials,[]);assert.equal(m.position.dataGap,true);assert.equal(migrateSimulator({bank:"bad",weights:{}},42).startedAt,42)});
+test("400 adversarial updates remain bounded",()=>{const s=createSimulator();for(let i=0;i<400;i++){const entry=i*3+1,exit=entry+1,long=i%2?20:80;processSimulator(s,market(long,100,entry),rows());const score=long===80?54:46,close=long===80?(i%3?101:99):(i%3?99:101);processSimulator(s,market(score,close,exit),rows(candle(exit,98,102,entry+.1)));s.pendingReversal=null}const values=Object.entries(s.weights);assert.equal(s.learningSteps,400);assert.ok(Math.abs(values.reduce((a,[,v])=>a+v,0)-100)<1e-9);for(const [k,v] of values){assert.ok(Number.isFinite(v));assert.ok(v>=WEIGHTS[k]*.60-1e-9);assert.ok(v<=WEIGHTS[k]*1.40+1e-9)}});
 
-const parts = Object.fromEntries(Object.keys(WEIGHTS).map(key => [key, .2]));
 
-function market(score = 80, close = 100, closeTime = 1_000) {
-  return Object.fromEntries(TIMEFRAMES.map(timeframe => [timeframe, {
-    long:score,
-    short:100 - score,
-    parts,
-    close,
-    closeTime
-  }]));
-}
+test("55 boundary closes all without synthetic partial",()=>{const s=createSimulator();processSimulator(s,market(),rows());processSimulator(s,market(55,104,2000),rows(candle(2000)));assert.equal(s.position,null);assert.equal(s.trades[0].partials.length,0);assert.ok(s.trades[0].pnl>0)});
+test("62 boundary takes partial but net non-profit does not",()=>{const profitable=createSimulator();processSimulator(profitable,market(),rows());processSimulator(profitable,market(62,104,2000),rows(candle(2000)));assert.equal(profitable.position.remainingFraction,.5);const flat=createSimulator();processSimulator(flat,market(),rows());processSimulator(flat,market(62,100.1,2000),rows(candle(2000,99,101)));assert.equal(flat.position.remainingFraction,1);assert.equal(flat.position.partials.length,0)});
+test("long and short use symmetric fixed-notional returns",()=>{const long=createSimulator();processSimulator(long,market(80,100,1000),rows());assert.ok(Math.abs(getMarkToMarket(long,{close:104}).pnl-38)<1e-9);const short=createSimulator();processSimulator(short,market(20,100,1000),rows());assert.ok(Math.abs(getMarkToMarket(short,{close:96}).pnl-38)<1e-9);processSimulator(long,market(70,105,2000),rows(candle(2000,99,105)));processSimulator(short,market(30,95,2000),rows(candle(2000,95,101)));assert.ok(Math.abs(long.trades[0].pnl-48)<1e-9);assert.ok(Math.abs(short.trades[0].pnl-48)<1e-9)});
+test("short partial and final accounting is symmetric with long",()=>{const s=createSimulator();processSimulator(s,market(20,100,1000),rows());processSimulator(s,market(40,96,2000),rows(candle(2000,96,101)));assert.ok(Math.abs(s.position.realizedPnl-19)<1e-9);assert.equal(s.position.remainingFraction,.5);assert.equal(s.learningSteps,0);processSimulator(s,market(46,97,3000),rows(candle(3000,96,98,2001)));assert.equal(s.position,null);assert.ok(Math.abs(s.trades[0].pnl-33)<1e-9);assert.equal(s.learningSteps,1)});
+test("short stop is symmetric with long stop",()=>{const s=createSimulator();processSimulator(s,market(20),rows());processSimulator(s,market(30,102,2000),rows(candle(2000,94,103)));assert.ok(Math.abs(s.trades[0].pnl+27)<1e-9)});
+test("reversal needs a real 3 of 4 agreement",()=>{const s=createSimulator();processSimulator(s,market(),rows());const opposite=market(0,99,2000);opposite["4h"].long=50;opposite["4h"].short=50;processSimulator(s,opposite,rows(candle(2000,98,101)));assert.equal(s.pendingReversal.agreement,3);assert.ok(s.pendingReversal.score>=75)});
+test("skipped expected reversal candle expires pending state",()=>{const s=createSimulator();processSimulator(s,market(),rows());processSimulator(s,market(20,99,2000),rows(candle(2000,98,101)));processSimulator(s,market(20,98,602000),rows(candle(602000,97,99,302001)));assert.equal(s.position,null);assert.equal(s.pendingReversal,null)});
+test("stale expected candle cannot open a later reversal",()=>{const s=createSimulator();processSimulator(s,market(),rows());processSimulator(s,market(20,99,2000),rows(candle(2000,98,101)));processSimulator(s,market(20,98,602000),{"5m":[candle(302000,97,99,2001),candle(602000,97,99,302001)]});assert.equal(s.position,null);assert.equal(s.pendingReversal,null)});
 
-test("the simulator opens only one position for the same extreme candle", () => {
-  const simulator = createSimulator(123);
-  const current = market();
-  const rows = { "5m":[] };
-  processSimulator(simulator, current, rows);
-  assert.equal(simulator.position.side, "long");
-  assert.equal(simulator.position.entry, 100);
-  assert.equal(simulator.startedAt, 123);
-  const firstPosition = simulator.position;
-  processSimulator(simulator, current, rows);
-  assert.equal(simulator.position, firstPosition);
-});
-
-test("a stop wins deterministically when stop and target occur in the same candle", () => {
-  const simulator = createSimulator();
-  processSimulator(simulator, market(), { "5m":[] });
-  const next = market(50, 102, 2_000);
-  processSimulator(simulator, next, { "5m":[{ time:1_001, closeTime:2_000, low:97, high:106 }] });
-  assert.equal(simulator.position, null);
-  assert.equal(simulator.trades.length, 1);
-  assert.equal(simulator.trades[0].reason, "Stop 2,5%");
-  assert.equal(simulator.trades[0].exit, 97.5);
-  assert.ok(simulator.bank < simulator.initialBank);
-});
-
-test("a persisted position pauses when the available history contains a gap", () => {
-  const simulator = createSimulator();
-  processSimulator(simulator, market(), { "5m":[] });
-  const result = processSimulator(simulator, market(80, 101, 20_000), {
-    "5m":[{ time:10_000, closeTime:20_000, low:99, high:102 }]
-  });
-  assert.equal(result.paused, true);
-  assert.equal(simulator.position.dataGap, true);
-  assert.equal(simulator.trades.length, 0);
-});
-
-test("mark-to-market includes the round-trip fee without mutating the bank", () => {
-  const simulator = createSimulator();
-  processSimulator(simulator, market(), { "5m":[] });
-  const mark = getMarkToMarket(simulator, { close:105 });
-  assert.ok(Math.abs(mark.pct - 4.8) < 1e-10);
-  assert.ok(Math.abs(mark.pnl - 48) < 1e-10);
-  assert.equal(simulator.bank, 1000);
-});
-
-test("a long position closes at its target and normalizes learned weights", () => {
-  const simulator = createSimulator();
-  processSimulator(simulator, market(), { "5m":[] });
-  processSimulator(simulator, market(50, 104, 2_000), {
-    "5m":[{ time:1_001, closeTime:2_000, low:99, high:105 }]
-  });
-  assert.equal(simulator.position, null);
-  assert.equal(simulator.trades[0].reason, "Objetivo 5%");
-  assert.equal(simulator.trades[0].exit, 105);
-  assert.equal(simulator.learningSteps, 1);
-  const weightTotal = Object.values(simulator.weights).reduce((sum, value) => sum + value, 0);
-  assert.ok(Math.abs(weightTotal - 100) < 1e-10);
-});
-
-test("an opposite multi-timeframe signal closes an open position", () => {
-  const simulator = createSimulator();
-  processSimulator(simulator, market(), { "5m":[] });
-  processSimulator(simulator, market(20, 99, 2_000), {
-    "5m":[{ time:1_001, closeTime:2_000, low:98, high:101 }]
-  });
-  assert.equal(simulator.trades[0].reason, "Señal contraria");
-  assert.equal(simulator.trades[0].exit, 99);
-  assert.equal(simulator.position.side, "short");
-});
-
-test("a short position uses the inverse target calculation", () => {
-  const simulator = createSimulator();
-  processSimulator(simulator, market(20), { "5m":[] });
-  assert.equal(simulator.position.side, "short");
-  processSimulator(simulator, market(50, 96, 2_000), {
-    "5m":[{ time:1_001, closeTime:2_000, low:95, high:101 }]
-  });
-  assert.equal(simulator.trades[0].reason, "Objetivo 5%");
-  assert.equal(simulator.trades[0].exit, 95);
-  assert.ok(simulator.trades[0].net > 0);
-});
-
-test("the checkpoint advances once and prevents evaluating the same candle twice", () => {
-  const simulator = createSimulator();
-  processSimulator(simulator, market(), { "5m":[] });
-  const current = market(50, 101, 2_000);
-  const rows = { "5m":[{ time:1_001, closeTime:2_000, low:99, high:102 }] };
-  processSimulator(simulator, current, rows);
-  assert.equal(simulator.position.lastEvaluatedCloseTime, 2_000);
-  processSimulator(simulator, current, rows);
-  assert.equal(simulator.position.lastEvaluatedCloseTime, 2_000);
-  assert.equal(simulator.trades.length, 0);
-});
-
-test("the current behavior reopens on a new extreme candle after closing", () => {
-  const simulator = createSimulator();
-  processSimulator(simulator, market(80, 100, 1_000), { "5m":[] });
-  processSimulator(simulator, market(80, 105, 2_000), {
-    "5m":[{ time:1_001, closeTime:2_000, low:99, high:105 }]
-  });
-  assert.equal(simulator.trades.length, 1);
-  assert.equal(simulator.position.side, "long");
-  assert.equal(simulator.position.entry, 105);
-  assert.equal(simulator.position.entryTime, 2_000);
-});

@@ -1,6 +1,7 @@
 ﻿import { analyze } from "./strategy.js";
-import { createSimulator, getConsensus, getMarkToMarket, processSimulator as updateSimulator, TIMEFRAMES } from "./simulator.js";
-const SIM_KEY = "btc-signal-simulator-v1";
+import { createSimulator, getConsensus, getMarkToMarket, migrateSimulator, processSimulator as updateSimulator, TIMEFRAMES } from "./simulator.js";
+const SIM_KEY = "btc-signal-simulator-v2";
+const LEGACY_SIM_KEY = "btc-signal-simulator-v1";
 const CHART_KEY = "btc-chart-indicators-v1";
 const CANDLE_COUNT_KEY = "btc-chart-candle-count-v1";
 const MARKET_HISTORY_LIMIT = 320;
@@ -33,8 +34,10 @@ function freshSimulator() {
 
 function loadSimulator() {
   try {
-    const saved = JSON.parse(localStorage.getItem(SIM_KEY));
-    if (saved && Number.isFinite(saved.bank) && saved.weights) return { ...freshSimulator(), ...saved };
+    const serialized = localStorage.getItem(SIM_KEY) ?? localStorage.getItem(LEGACY_SIM_KEY);
+    const simulator = migrateSimulator(JSON.parse(serialized));
+    if (serialized) localStorage.setItem(SIM_KEY, JSON.stringify(simulator));
+    return simulator;
   } catch {}
   return freshSimulator();
 }
@@ -163,23 +166,25 @@ function renderSimulator() {
     ["TRADES CERRADOS", sim.trades.length],
     ["TASA DE ACIERTO", sim.trades.length ? `${number(closedWins/sim.trades.length*100,1)}%` : "—"],
     ["AJUSTES APRENDIDOS", sim.learningSteps],
-    ["ESTADO", sim.position ? `EN ${sim.position.side.toUpperCase()}` : "ESPERANDO"]
+    ["ESTADO", sim.position ? `EN ${sim.position.side.toUpperCase()}` : sim.pendingReversal ? "REVERSAL PENDING" : "ESPERANDO"]
   ];
   $("simulatorStats").innerHTML = stats.map(([label,value,tone]) => `<div class="stat"><span>${label}</span><strong class="${tone>0?"positive":tone<0?"negative":""}">${value}</strong></div>`).join("");
 
   if (sim.position) {
     const p = sim.position;
     $("openPosition").className = `open-position ${p.side}`;
-    $("openPosition").innerHTML = `<div><span>${p.dataGap?"POSICIÓN PAUSADA":"POSICIÓN ABIERTA"}</span><strong>${p.side.toUpperCase()} · ${money(p.entry)}</strong></div><div><span>FECHA DE ENTRADA</span><strong>${formatDate(p.entryTime)}</strong></div><div><span>ESTADO</span><strong>${p.dataGap?"Datos históricos incompletos":`${p.longScore} L / ${p.shortScore} S`}</strong></div><div><span>P&amp;L FLOTANTE</span><strong class="${mark.pnl>=0?"positive":"negative"}">${mark.pnl>=0?"+":""}${money(mark.pnl,2)} · ${number(mark.pct)}%</strong></div>`;
+    $("openPosition").innerHTML = `<div><span>${p.dataGap?"POSITION PAUSED":"OPEN POSITION"}</span><strong>${p.side.toUpperCase()} · ${money(p.entry)}</strong></div><div><span>REMAINING SIZE</span><strong>${number(p.remainingFraction*100,0)}%${p.partialTaken?" · PARTIAL TAKEN":""}</strong></div><div><span>REALIZED P&amp;L</span><strong class="${p.realizedPnl>=0?"positive":"negative"}">${p.realizedPnl>=0?"+":""}${money(p.realizedPnl,2)}</strong></div><div><span>UNREALIZED P&amp;L</span><strong class="${mark.pnl>=0?"positive":"negative"}">${mark.pnl>=0?"+":""}${money(mark.pnl,2)} · ${number(mark.pct)}%</strong></div>`;
   } else {
     $("openPosition").className = "open-position waiting";
-    $("openPosition").innerHTML = `<div><span>SIN POSICIÓN</span><strong>Esperando zona extrema y confirmación 3/4</strong></div>`;
+    $("openPosition").innerHTML = sim.pendingReversal
+      ? `<div><span>REVERSAL PENDING</span><strong>${sim.pendingReversal.side.toUpperCase()} · ${sim.pendingReversal.score} score · ${sim.pendingReversal.agreement}/4 agreement</strong></div><div><span>EARLIEST ENTRY</span><strong>Next confirmed closed 5m candle</strong></div>`
+      : `<div><span>NO POSITION</span><strong>Waiting for an extreme zone with 3/4 confirmation</strong></div>`;
   }
 
   $("consensusScore").textContent = `${signal.long} LONG / ${signal.short} SHORT · ${signal.agreement}/4 confirman`;
   $("timeframeSignals").innerHTML = TIMEFRAMES.map(tf => { const c=state.currentByTf[tf]; const lead=c.long>=c.short?"long":"short"; return `<div class="tf-signal ${lead}"><span>${labelTf(tf)}</span><strong>${c.long} L</strong><strong>${c.short} S</strong></div>`; }).join("");
   $("tradeCount").textContent = `${sim.trades.length} trade${sim.trades.length===1?"":"s"}`;
-  $("tradesBody").innerHTML = sim.trades.length ? sim.trades.map(t => `<tr><td>${formatDate(t.entryTime)}</td><td><span class="trade-side ${t.side}">${t.side.toUpperCase()}</span></td><td>${t.longScore} / ${t.shortScore}</td><td>${money(t.entry)} → ${money(t.exit)}</td><td>${formatDate(t.exitTime)}<small>${t.reason}</small></td><td class="${t.pnl>=0?"positive":"negative"}">${t.pnl>=0?"+":""}${money(t.pnl,2)}<small>${t.net>=0?"+":""}${number(t.net*100)}%</small></td></tr>`).join("") : `<tr><td colspan="6" class="empty-trades">Aún no hay operaciones. El simulador esperará una señal extrema real.</td></tr>`;
+  $("tradesBody").innerHTML = sim.trades.length ? sim.trades.map(t => `<tr><td>${formatDate(t.entryTime)}</td><td><span class="trade-side ${t.side}">${t.side.toUpperCase()}</span></td><td>${t.longScore} / ${t.shortScore}</td><td>${money(t.entry)} → ${money(t.exit)}${t.partials?.length?`<small>50% partial at ${money(t.partials[0].price)}</small>`:""}</td><td>${formatDate(t.exitTime)}<small>${t.reason}</small></td><td class="${t.pnl>=0?"positive":"negative"}">${t.pnl>=0?"+":""}${money(t.pnl,2)}<small>Realized · ${t.net>=0?"+":""}${number(t.net*100)}%</small></td></tr>`).join("") : `<tr><td colspan="6" class="empty-trades">No trades yet. The simulator is waiting for a confirmed extreme signal.</td></tr>`;
   $("simUpdated").textContent = `Actualiza cada 60 s · ${new Date().toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"})}`;
 }
 
