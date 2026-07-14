@@ -1,10 +1,12 @@
 import { WEIGHTS } from "./strategy.js";
 import { detectPatternCandidates, RECENT_MEMORY, TOTAL_MEMORY } from "./institutional-intelligence.js";
+import { analyzePriceVolumeDivergence, divergenceGate } from "./volume-divergence.js";
 
 export const EXECUTION_TIMEFRAME = "1m";
 export const TIMEFRAMES = ["1m", "5m", "15m", "1h"];
 export { RECENT_MEMORY, TOTAL_MEMORY };
 export const SIMULATOR_VERSION = 6;
+export const DIVERGENCE_FEATURE_SCHEMA_VERSION = 2;
 export const STRATEGY_VERSION = "institutional-1m-basket-10x-v1";
 export const TF_INFLUENCE = { "1m": .40, "5m": .25, "15m": .20, "1h": .15 };
 export const BASKET_MARGIN_FRACTIONS = Object.freeze([.01, .02, .04, .08]);
@@ -102,6 +104,9 @@ function replaySlices(p){
 function canonicalCompletedTrade(stored){
   if(!stored||!validBasket(stored)||!finite(stored.exitTime)||!finite(stored.pnl)||!finite(stored.net))return null;
   const trade=structuredClone(stored),slices=replaySlices(trade);if(!slices||!trade.legs.every(l=>l.remainingNotional<=EPS))return null;
+  if(!Object.hasOwn(stored,"entryDecision"))trade.entryDecision=legacyDivergenceMarker();
+  else if(isLegacyDivergenceMarker(stored.entryDecision))trade.entryDecision=legacyDivergenceMarker();
+  else{const entry=canonicalDecisionSnapshots([trade.entryDecision])[0];if(!entry||!entry.opened||entry.side!==trade.side)return null;trade.entryDecision=entry;}
   const pnl=-trade.legs.reduce((s,l)=>s+l.entryFee,0)+slices.reduce((s,x)=>s+x.pnl,0),net=pnl/trade.baselineEquity;
   if(Math.abs(stored.pnl-pnl)>EPS||Math.abs(stored.net-net)>EPS)return null;
   trade.partials=slices;trade.pnl=trade.pnlCurrency=pnl;trade.net=trade.netRoi=net;return trade;
@@ -110,6 +115,42 @@ function validBasket(p) {
   return p && ["long", "short"].includes(p.side) && finite(p.baselineEquity) && p.baselineEquity > 0
     && Array.isArray(p.legs) && p.legs.length >= 1
     && p.legs.length <= 4 && p.legs.every((l, i) => validLeg(l, p.baselineEquity, i, p.side));
+}
+function validDivergenceResult(d) {
+  return d && d.divergenceSchemaVersion===2 && ["detected","neutral","unavailable"].includes(d.status)
+    && ["bullish","bearish","none","ambiguous"].includes(d.divergence)
+    && finite(d.strength) && d.strength >= 0 && d.strength <= 100
+    && d.method === "confirmed-pivot-volume-obv-ad-v1" && finite(d.evaluatedAt)
+    && Number.isInteger(d.barsUsed) && d.barsUsed >= 0 && d.barsUsed <= 160
+    && ["quoteVolume","baseVolume-fallback","unavailable"].includes(d.volumeSource)
+    && typeof d.reason === "string" && d.reason.length <= 240;
+}
+function canonicalDivergenceResult(d){
+  if(!d||typeof d!=="object")return null;
+  let candidate=d;
+  if(d.divergenceSchemaVersion!==2&&["aligned","conflicting","neutral","unavailable"].includes(d.status)&&finite(d.confidence)){
+    const unavailable=d.status==="unavailable"||d.volumeSource==="unavailable";
+    const detected=!unavailable&&["bullish","bearish","ambiguous"].includes(d.divergence);
+    candidate={...d,divergenceSchemaVersion:2,status:unavailable?"unavailable":detected?"detected":"neutral",strength:d.confidence};
+  }
+  if(!validDivergenceResult(candidate))return null;
+  d=candidate;
+  const n=v=>finite(v)?v:null,pivot=p=>p&&typeof p==="object"?{index:Number.isInteger(p.index)?p.index:null,time:n(p.time),price:n(p.price),relativeVolume:n(p.relativeVolume),confirmedAt:n(p.confirmedAt)}:null;
+  const components=d.components&&typeof d.components==="object"?Object.fromEntries(Object.entries(d.components).filter(([k,v])=>["rawExhaustion","obvConfirmation","adConfirmation","obvDelta","adDelta"].includes(k)&&(["boolean","number"].includes(typeof v))&&v===v).slice(0,5)):null;
+  const pivots=d.pivots?.pivot1||d.pivots?.pivot2?{pivot1:pivot(d.pivots.pivot1),pivot2:pivot(d.pivots.pivot2),separation:n(d.pivots.separation),confirmationAge:n(d.pivots.confirmationAge)}:null;
+  return{divergenceSchemaVersion:2,status:d.status,divergence:d.divergence,strength:d.strength,method:d.method,evaluatedAt:d.evaluatedAt,barsUsed:d.barsUsed,volumeSource:d.volumeSource,pivots,components,reason:d.reason};
+}
+function legacyDivergenceMarker(){return{divergenceFeatureSchemaVersion:0,auditStatus:"legacy-pre-divergence",evaluated:false,reason:"not evaluated"};}
+function isLegacyDivergenceMarker(x){return x&&x.divergenceFeatureSchemaVersion===0&&x.auditStatus==="legacy-pre-divergence"&&x.evaluated===false&&x.reason==="not evaluated";}
+function canonicalDecisionSnapshots(rows) {
+  if (!Array.isArray(rows)) return [];
+  const seen=new Set(),out=[];
+  for(const row of rows){const key=row?.closeTime;
+    const divergence=canonicalDivergenceResult(row?.divergence);
+    if(seen.has(key)||row?.divergenceFeatureSchemaVersion!==DIVERGENCE_FEATURE_SCHEMA_VERSION||!["long","short"].includes(row?.side)||!finite(row?.closeTime)||!divergence||divergence.evaluatedAt!==row.closeTime||typeof row.opened!=="boolean")continue;
+    const gate=divergenceGate(row.side,divergence);if(row.opened!==gate.allowed)continue;
+    seen.add(key);out.push({divergenceFeatureSchemaVersion:DIVERGENCE_FEATURE_SCHEMA_VERSION,closeTime:row.closeTime,side:row.side,opened:row.opened,gate,divergence,consensus:row.consensus&&typeof row.consensus==="object"?structuredClone(row.consensus):null,macro:row.macro&&typeof row.macro==="object"?structuredClone(row.macro):null,setupClass:["strong","weak-with-fresh-macro"].includes(row.setupClass)?row.setupClass:"strong"});if(out.length===100)break;
+  }return out;
 }
 
 export function migrateSimulator(raw, now = Date.now()) {
@@ -121,8 +162,11 @@ export function migrateSimulator(raw, now = Date.now()) {
   const trades = Array.isArray(raw.trades) ? raw.trades.map(canonicalCompletedTrade).filter(Boolean)
     .sort((a,b)=>b.exitTime-a.exitTime).slice(0,TOTAL_MEMORY) : [];
   let position = null, canonicalBank=raw.bank;
-  if(raw.position && validBasket(raw.position)) {
+  const entryAbsent=raw.position&&!Object.hasOwn(raw.position,"entryDecision"),entryLegacy=isLegacyDivergenceMarker(raw.position?.entryDecision);
+  const persistedEntry=entryAbsent||entryLegacy?legacyDivergenceMarker():canonicalDecisionSnapshots(raw.position?.entryDecision?[raw.position.entryDecision]:[])[0];
+  if(raw.position && validBasket(raw.position) && (isLegacyDivergenceMarker(persistedEntry)||(persistedEntry?.opened&&persistedEntry.side===raw.position.side))) {
     const p=structuredClone(raw.position);
+    p.entryDecision=persistedEntry;
     const replayed=replaySlices(p);if(!replayed)return {...fresh};p.partials=replayed;
     const replayExitFees=p.partials.reduce((s,x)=>s+x.fee,0),replayRealized=p.partials.reduce((s,x)=>s+x.pnl,0),replayRemaining=p.legs.reduce((s,l)=>s+l.remainingNotional,0);
     if(!finite(p.exitFeesPaid)||Math.abs(p.exitFeesPaid-replayExitFees)>EPS||!finite(p.realizedPnl)||Math.abs(p.realizedPnl-replayRealized)>EPS||!finite(p.remainingNotional)||Math.abs(p.remainingNotional-replayRemaining)>EPS)return {...fresh};
@@ -139,6 +183,7 @@ export function migrateSimulator(raw, now = Date.now()) {
   return { ...fresh, bank: canonicalBank, weights: weightsFromTradeMemory(trades), trades, position,
     learningSteps: trades.length, learning: learningMetadata(trades.length),
     lastProcessedCloseTime: finite(raw.lastProcessedCloseTime) ? raw.lastProcessedCloseTime : null,
+    decisionSnapshots: canonicalDecisionSnapshots(raw.decisionSnapshots),
     riskControl: persistedHalt ? { halted: true, reason: String(raw.riskControl?.reason || "Global 20% equity halt"), haltedAt: raw.riskControl?.haltedAt || now, threshold: GLOBAL_FLOOR } : fresh.riskControl };
 }
 
@@ -239,13 +284,13 @@ function finish(sim,p,price,time,reason) {
   if(sim.bank<=GLOBAL_FLOOR+EPS){sim.riskControl={halted:true,reason:"Global 20% equity halt",haltedAt:time,threshold:GLOBAL_FLOOR};}
 }
 
-function openBasket(sim, side, market, candle) {
+function openBasket(sim, side, market, candle, entryDecision = null) {
   const baseline=sim.bank,p={side,baselineEquity:baseline,lossAllowance:baseline*.10,effectiveFloor:Math.max(baseline*.90,GLOBAL_FLOOR),
     entryTime:candle.closeTime,legs:[],totalMargin:0,totalNotional:0,remainingNotional:0,remainingFraction:1,weightedAverage:0,
     entryFeesPaid:0,exitFeesPaid:0,feesPaid:0,realizedPnl:0,partials:[],structuralPartials:[],pendingAdd:null,usedZones:[],
     lastZoneTime:null,lastEvaluatedCloseTime:candle.closeTime,dataGap:false,parts:market.parts||{},timeframeScores:{},lastMarket:market,closedRows:[candle],
     riskPolicy:"10% basket-start equity target; gaps or synthetic liquidation can exceed it",
-    candidateIds:detectPatternCandidates(market),weightsBefore:{...sim.weights},structuralPartialExecutions:0,
+    candidateIds:detectPatternCandidates(market),weightsBefore:{...sim.weights},structuralPartialExecutions:0,entryDecision,
     liquidationPolicy:`Modeled cross-margin liquidation with ${(MAINTENANCE_MARGIN_RATE*100).toFixed(1)}% maintenance; exchange-specific reality may differ`};
   sim.position=p;addLeg(sim,p,candle.close,candle.closeTime);p.structuralPartials=planStructuralPartials(side,market,[candle]);
 }
@@ -266,7 +311,13 @@ export function processSimulator(sim,currentByTf,rowsByTf,{macroSnapshot}={}) {
   if(sim.riskControl.halted)return{halted:true};
   if(!sim.position){const c=getConsensus(currentByTf);
     const eligibleMacro=macroEligible(macroSnapshot,candle.closeTime),long=(c.long>=75&&c.agreementLong>=3)||(eligibleMacro&&c.long>=68&&c.agreementLong>=3),short=(c.short>=75&&c.agreementShort>=3)||(eligibleMacro&&c.short>=68&&c.agreementShort>=3);
-    if(long||short)openBasket(sim,long?"long":"short",market,candle);return{opened:Boolean(long||short)};}
+    if(long||short){const side=long?"long":"short",divergence=analyzePriceVolumeDivergence(rowsByTf["1m"]),gate=divergenceGate(side,divergence);
+      const setupClass=(side==="long"?c.long:c.short)>=75?"strong":eligibleMacro?"weak-with-fresh-macro":"ineligible";
+      const snapshot={divergenceFeatureSchemaVersion:DIVERGENCE_FEATURE_SCHEMA_VERSION,closeTime:candle.closeTime,side,opened:gate.allowed,gate,divergence,consensus:{...c},macro:{eligible:eligibleMacro,score:finite(macroSnapshot?.score)?macroSnapshot.score:null},setupClass};
+      sim.decisionSnapshots=canonicalDecisionSnapshots([snapshot,...(sim.decisionSnapshots||[])]);
+      if(gate.allowed)openBasket(sim,side,market,candle,structuredClone(snapshot));
+      return{opened:gate.allowed,blocked:!gate.allowed,divergence:gate};}
+    return{opened:false};}
   const p=sim.position;p.dataGap=false;p.lastMarket=market;p.closedRows=rowsByTf["1m"].filter(x=>x.closeTime<=candle.closeTime);p.lastEvaluatedCloseTime=candle.closeTime;
   // Immutable pre-add basket is always tested at the new open first.
   p.riskBoundary=riskPrice(p,sim.bank);p.liquidationBoundary=liquidationPrice(p,sim.bank);

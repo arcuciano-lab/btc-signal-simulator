@@ -1,4 +1,4 @@
-const finite = Number.isFinite;
+﻿const finite = Number.isFinite;
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const FORBIDDEN = /\b(compra|vende|venta|comprar|vender|entra|entrada|salir|salida|buy|sell|enter|entry|exit)\b/iu;
 export const TOTAL_MEMORY = 1000;
@@ -77,7 +77,7 @@ export function buildPatternEvidence(rows, horizon = 5, modeledCost = .003) {
 
 function bar(value, width = 12) {
   const filled = Math.round(clamp(finite(value) ? value : 0, 0, 100) / 100 * width);
-  return `${"█".repeat(filled)}${"░".repeat(width - filled)}`;
+  return `${"â–ˆ".repeat(filled)}${"â–‘".repeat(width - filled)}`;
 }
 
 export function buildInstitutionalReport({ market, simulator, macroSnapshot, patterns = [] } = {}) {
@@ -94,10 +94,17 @@ export function buildInstitutionalReport({ market, simulator, macroSnapshot, pat
   const volume = market && finite(market.volRatio) ? `${market.volRatio.toFixed(2)}x baseline` : "missing data";
   const volatility = market && finite(market.bbUpper) && finite(market.bbLower) && market.close > 0 ? `${((market.bbUpper-market.bbLower)/market.close*100).toFixed(2)}% band width` : "missing data";
   const macroValid = macroSnapshot && finite(macroSnapshot.score) && finite(macroSnapshot.updatedAt) && macroSnapshot.stale !== true;
-  const macro = macroValid ? `${macroSnapshot.score}% · intensity only · ${macroSnapshot.source || "source missing"}` : "missing or stale data";
+  const macro = macroValid ? `${macroSnapshot.score}% Â· intensity only Â· ${macroSnapshot.source || "source missing"}` : "missing or stale data";
   const patternRows = patterns.length ? patterns.map(p => `${p.name}: ${p.status} (${p.outcomes}/${p.occurrences})`) : ["No validated candidates; insufficient evidence"];
   const tradeRows = trades.length ? trades.map((t, i) => `#${i + 1} result ${finite(t.net) ? (t.net*100).toFixed(2)+"%" : "missing"}; recalibration ${t.learning ? "audited" : "missing"}`) : ["No completed sample"];
-  const halt = simulator?.riskControl?.halted ? `ACTIVE · ${simulator.riskControl.reason || "capital protection"}` : "inactive";
+  const halt = simulator?.riskControl?.halted ? `ACTIVE Â· ${simulator.riskControl.reason || "capital protection"}` : "inactive";
+  const decisions = Array.isArray(simulator?.decisionSnapshots) ? simulator.decisionSnapshots.slice(0, 100) : [];
+  const latestDivergence = decisions[0];
+  const legacyDivergence = simulator?.position?.entryDecision?.auditStatus === "legacy-pre-divergence";
+  const divergenceSummary = latestDivergence
+    ? `decision ${new Date(latestDivergence.closeTime).toISOString()}; detector ${latestDivergence.divergence?.status || "unavailable"}/${latestDivergence.divergence?.divergence || "none"}; relationship ${latestDivergence.gate?.status || "unavailable"}; evidence strength ${Math.round(latestDivergence.divergence?.strength || 0)}/100; age ${Math.max(0,Math.round((Date.now()-latestDivergence.closeTime)/60000))}m; ${latestDivergence.divergence?.reason || latestDivergence.gate?.reason || "reason unavailable"}`
+    : legacyDivergence ? "legacy-pre-divergence; not evaluated; excluded from divergence audit statistics" : "not yet evaluated";
+  const blockedDivergence = decisions.filter(d => d.opened === false).length;
   const lines = [
     "Adaptive Strategy Intelligence Report",
     "1. Market Context", `Trend: ${trend}`, `Volume: ${volume}`, `Volatility: ${volatility}`,
@@ -105,7 +112,8 @@ export function buildInstitutionalReport({ market, simulator, macroSnapshot, pat
     `MACD: ${finite(market?.hist) ? market.hist.toFixed(4) : "missing data"}`, "S/R: confirmed structures only",
     "2. Indicator Weights", ...(weightRows.length ? weightRows : ["missing data"]),
     "3. Indicator Evolution", `Priority evolution sample: ${trades.filter(t=>t.learning?.weightsAfter).length}/100`, ...evolution,
-    "4. Pattern Analysis", ...patternRows,
+    "4. Pattern Analysis", ...patternRows, `Latest price-volume eligibility check: ${divergenceSummary}`,
+    `Recent divergence checks: ${decisions.length}/100; conflict/unavailable vetoes: ${blockedDivergence}`,
     "5. Macro Score", `Score/status: ${macro}`, "Policy: intensity eligibility; never directional evidence",
     "6. Trade Memory (two horizons)", `Stored: ${memory.stored}/1000`, `Priority window: ${memory.recentCount}/100; positive results: ${memory.recentWins}`,
     `Archive baseline: ${memory.archiveCount}/900; positive results: ${memory.archiveWins}`,
@@ -120,8 +128,8 @@ export function buildInstitutionalReport({ market, simulator, macroSnapshot, pat
   const width = 78;
   const safe = lines.flatMap(line => String(line).match(new RegExp(`.{1,${width - 4}}`, "g")) || [""])
     .map(line => FORBIDDEN.test(line) ? "Vocabulary policy violation suppressed" : line);
-  const top = `┌${"─".repeat(width - 2)}┐`, bottom = `└${"─".repeat(width - 2)}┘`;
-  return [top, ...safe.map(line => `│ ${line.padEnd(width - 4)} │`), bottom].join("\n");
+  const top = `+${"-".repeat(width - 2)}+`, bottom = top;
+  return [top, ...safe.map(line => `| ${line.padEnd(width - 4)} |`), bottom].join("\n");
 }
 
 export function reportHasForbiddenVocabulary(report) { return FORBIDDEN.test(String(report)); }

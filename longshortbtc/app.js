@@ -146,7 +146,7 @@ async function getCandles(tf, force = false) {
   const response = await fetch(`/api/klines?interval=${tf}&limit=${limit}`);
   const json = await response.json();
   if (!response.ok) throw new Error(json.error || "No se pudo consultar el mercado");
-  const mapped = json.map(k => ({ time:k[0], open:+k[1], high:+k[2], low:+k[3], close:+k[4], volume:+k[5], closeTime:k[6] }));
+  const mapped = json.map(k => ({ time:k[0], open:+k[1], high:+k[2], low:+k[3], close:+k[4], volume:+k[5], quoteVolume:+k[7], closeTime:k[6] }));
   if (!mapped.length || mapped.some(candle => !isValidCandle(candle))) throw new Error("Invalid or incomplete candle payload");
   const candles = mapped.filter(candle => candle.closeTime < Date.now());
   if (!candles.length) throw new Error("No closed candles available");
