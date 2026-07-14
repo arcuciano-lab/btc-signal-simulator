@@ -73,5 +73,12 @@ footer{display:flex;justify-content:space-between;padding:26px 0 40px;border-top
 @media(max-width:900px){.signal-banner{grid-template-columns:1fr 1fr}.signal-banner-gauge{grid-column:1/-1;grid-row:2}.signal-banner .score-row{grid-column:2;grid-row:1}}
 @media(max-width:620px){.signal-banner{grid-template-columns:1fr;padding:20px 18px;gap:18px}.signal-banner-status,.signal-banner-gauge,.signal-banner .score-row{grid-column:1;grid-row:auto}.signal-banner .score strong{font-size:34px}}
 
+/* High-impact macroeconomic calendar ticker */
+.macro-ticker{height:74px;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:stretch;margin:-18px 0 25px;border:2px solid var(--line);background:var(--paper);overflow:hidden}.macro-ticker-label{display:flex;flex-direction:column;justify-content:center;padding:0 22px;border-right:1px solid var(--line)}.macro-ticker-label span{font:8px DM Mono;color:var(--red);letter-spacing:.12em}.macro-ticker-label strong{margin-top:5px;font:10px DM Mono;letter-spacing:.08em}.macro-ticker>a{display:grid;place-items:center;padding:0 18px;border-left:1px solid var(--line);color:var(--muted);font:8px DM Mono;letter-spacing:.08em;text-decoration:none}.macro-ticker-viewport{display:flex;align-items:center;overflow:hidden;mask-image:linear-gradient(90deg,transparent,#000 4%,#000 96%,transparent)}.macro-ticker-track{display:flex;width:max-content;min-width:100%;animation:macro-scroll 50s linear infinite}.macro-event{display:flex;align-items:center;gap:12px;flex:none;padding:0 30px;border-right:1px solid var(--line);white-space:nowrap;font:9px DM Mono;color:var(--muted)}.macro-event strong{color:var(--ink);font-weight:500}.macro-event .macro-value:first-of-type{color:var(--green)}.macro-ticker-status{margin:auto;padding:0 20px;color:var(--muted);font:10px DM Mono}@keyframes macro-scroll{to{transform:translateX(-50%)}}
+@media(max-width:620px){.macro-ticker{grid-template-columns:auto minmax(0,1fr);height:66px}.macro-ticker-label{padding:0 12px}.macro-ticker>a{display:none}.macro-event{padding:0 18px}}
+@media(prefers-reduced-motion:reduce){.macro-ticker-track{animation:none}.macro-ticker-viewport{overflow-x:auto}}
 
 
+
+
+.macro-ticker-group{display:flex;min-width:100%}

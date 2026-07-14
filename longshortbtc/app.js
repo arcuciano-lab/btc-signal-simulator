@@ -10,6 +10,34 @@ const money = (v, digits = 0) => new Intl.NumberFormat("es-ES", { style:"currenc
 const number = (v, d = 2) => new Intl.NumberFormat("es-ES", { minimumFractionDigits:d, maximumFractionDigits:d }).format(v);
 const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
 
+function macroValue(label, value) {
+  if (!value) return null;
+  const span = document.createElement("span");
+  span.className = "macro-value";
+  span.textContent = `${label} ${value}`;
+  return span;
+}
+function renderMacroItems(items) {
+  const track = $("macroTickerTrack");
+  track.replaceChildren();
+  if (!items.length) {
+    const status = document.createElement("span"); status.className = "macro-ticker-status"; status.textContent = "Calendario macro no disponible temporalmente"; track.append(status); return;
+  }
+  const group = document.createElement("span"); group.className = "macro-ticker-group";
+  items.forEach(item => {
+    const event = document.createElement("span"); event.className = "macro-event";
+    const time = item.timestamp ? new Intl.DateTimeFormat("es-ES", { hour:"2-digit", minute:"2-digit" }).format(item.timestamp) : "HOY";
+    const heading = document.createElement("strong"); heading.textContent = `${time} · ${item.currency || "GLOBAL"} · ${item.title}`; event.append(heading);
+    [["REAL", item.actual], ["PREV.", item.forecast], ["ANT.", item.previous]].map(([label, value]) => macroValue(label, value)).filter(Boolean).forEach(node => event.append(node));
+    group.append(event);
+  });
+  track.append(group, group.cloneNode(true));
+}
+async function loadMacroTicker() {
+  try { const response = await fetch("/api/macro-calendar"); const payload = await response.json(); renderMacroItems(Array.isArray(payload.items) ? payload.items : []); }
+  catch { renderMacroItems([]); }
+}
+
 const state = {
   tf: "1h",
   cache: {},
@@ -295,5 +323,7 @@ $("resetSimulator").addEventListener("click", () => {
 document.querySelectorAll("[data-chart-toggle]").forEach(btn=>btn.addEventListener("click",()=>{const key=btn.dataset.chartToggle;state.chartIndicators[key]=!state.chartIndicators[key];localStorage.setItem(CHART_KEY,JSON.stringify(state.chartIndicators));if(state.lastRows)drawCharts(state.lastRows.slice(-VISIBLE_CANDLE_COUNT))}));
 window.addEventListener("resize",()=>{if(state.lastResize)clearTimeout(state.lastResize);state.lastResize=setTimeout(()=>state.lastRows&&drawCharts(state.lastRows.slice(-VISIBLE_CANDLE_COUNT)),150)});
 setInterval(() => load(state.tf, true), 60_000);
+setInterval(loadMacroTicker, 15 * 60_000);
+loadMacroTicker();
 load(state.tf);
 

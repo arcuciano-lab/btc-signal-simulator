@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 4173);
 const ALLOWED_INTERVALS = new Set(["5m", "15m", "1h", "4h"]);
+const ECONOMIC_CALENDAR_URL = "https://es.investing.com/economic-calendar/";
 const NEWS_SOURCES = [
   { source:"FED", category:"MACRO", url:"https://www.federalreserve.gov/feeds/press_monetary.xml", limit:4 },
   { source:"BCE", category:"MACRO UE", url:"https://www.ecb.europa.eu/rss/press.html", limit:4 },
@@ -17,6 +18,8 @@ const NEWS_SOURCES = [
 ];
 let newsCache = { items:[], oil:null, expiresAt:0 };
 let newsRequest = null;
+let macroCache = { items:[], updatedAt:0, expiresAt:0 };
+let macroRequest = null;
 const klineCache = new Map();
 const klineRequests = new Map();
 const mime = {
@@ -62,6 +65,43 @@ function parseFeed(xml, config) {
     const dateText = xmlField(block,["pubDate","published","updated","dc:date"]);
     return { source:config.source, category:config.category, title:xmlField(block,["title"]), url:href||xmlField(block,["link"]), publishedAt:dateText?Date.parse(dateText)||0:0 };
   }).filter(item=>item.title&&/^https?:\/\//i.test(item.url)&&(!config.filter||config.filter.test(item.title)));
+}
+
+function stripMarkup(value = "") { return decodeXml(value.replace(/<script\b[\s\S]*?<\/script>/gi, "").replace(/<style\b[\s\S]*?<\/style>/gi, "")); }
+function calendarField(row, classPattern) {
+  const match = row.match(new RegExp(`<[^>]*class=["'][^"']*(?:${classPattern})[^"']*["'][^>]*>([\\s\\S]*?)<\\/[^>]+>`, "i"));
+  return stripMarkup(match?.[1] || "");
+}
+export function parseEconomicCalendar(html, now = Date.now()) {
+  const rows = [...html.matchAll(/<tr\b[^>]*(?:id=["']eventRowId_[^"']+|class=["'][^"']*js-event-item[^"']*)[^>]*>[\s\S]*?<\/tr>/gi)].map(match => match[0]);
+  const events = rows.map(row => {
+    const fullIcons = (row.match(/grayFullBullishIcon/gi) || []).length;
+    const impact = fullIcons >= 3 || /(?:data-img_key|class)=["'][^"']*bull3\b/i.test(row) || /importance(?:Level)?=["']3["']/i.test(row) ? "high" : "";
+    const currency = calendarField(row, "flagCur|left.*flag").replace(/[^A-Z]/g, "").slice(0, 3);
+    const title = calendarField(row, "event") || calendarField(row, "eventTd");
+    const dateText = row.match(/data-event-datetime=["']([^"']+)/i)?.[1]?.trim() || "";
+    const normalizedDate = dateText.match(/^\d{4}[/-]\d{2}[/-]\d{2} \d{2}:\d{2}(?::\d{2})?$/) ? dateText.replaceAll("/", "-").replace(" ", "T") : "";
+    const parsedTimestamp = normalizedDate ? Date.parse(normalizedDate) : NaN;
+    const timestamp = Number.isFinite(parsedTimestamp) ? parsedTimestamp : null;
+    return { title, currency, impact, timestamp, actual:calendarField(row, "act"), forecast:calendarField(row, "fore"), previous:calendarField(row, "prev") };
+  }).filter(item => item.impact === "high" && item.title && item.timestamp !== null && item.timestamp >= now - 12 * 60 * 60 * 1000)
+    .sort((a, b) => a.timestamp - b.timestamp);
+  return [...new Map(events.map(item => [`${item.timestamp}\u0000${item.currency}\u0000${item.title.toLocaleLowerCase("es")}`, item])).values()].slice(0, 10);
+}
+async function fetchEconomicCalendar() {
+  if (macroCache.expiresAt > Date.now()) return { ...macroCache, stale:false, source:"Investing.com" };
+  if (macroRequest) return macroRequest;
+  macroRequest = (async () => {
+    try {
+      const response = await fetch(ECONOMIC_CALENDAR_URL, { headers:{ "user-agent":"Mozilla/5.0 (compatible; SimpleTrading/2.3)", accept:"text/html" }, signal:AbortSignal.timeout(8000) });
+      if (!response.ok) throw new Error(`Economic calendar: ${response.status}`);
+      const items = parseEconomicCalendar(await response.text());
+      if (!items.length) throw new Error("Economic calendar returned no high-impact events");
+      macroCache = { items, updatedAt:Date.now(), expiresAt:Date.now() + 15 * 60 * 1000 };
+      return { ...macroCache, stale:false, source:"Investing.com" };
+    } catch { return { ...macroCache, stale:true, source:"Investing.com", unavailable:macroCache.items.length === 0 }; }
+  })();
+  try { return await macroRequest; } finally { macroRequest = null; }
 }
 
 async function fetchTrumpPosts(){
@@ -115,6 +155,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === "/api/news") {
       return send(res, 200, JSON.stringify(await fetchNews()));
     }
+    if (url.pathname === "/api/macro-calendar") return send(res, 200, JSON.stringify(await fetchEconomicCalendar()));
     if (url.pathname === "/api/klines") {
       const interval = url.searchParams.get("interval") || "1h";
       const requestedLimit = Number(url.searchParams.get("limit"));
@@ -157,6 +198,8 @@ const server = http.createServer(async (req, res) => {
 export function resetServerState() {
   newsCache = { items:[], oil:null, expiresAt:0 };
   newsRequest = null;
+  macroCache = { items:[], updatedAt:0, expiresAt:0 };
+  macroRequest = null;
   klineCache.clear();
   klineRequests.clear();
 }
