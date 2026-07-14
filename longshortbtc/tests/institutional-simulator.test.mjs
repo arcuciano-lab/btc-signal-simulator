@@ -1,139 +1,58 @@
 ﻿import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { createSimulator, migrateSimulator, processSimulator, RECENT_MEMORY, TIMEFRAMES, TOTAL_MEMORY, weightsFromTradeMemory } from "../simulator.js";
-import { buildInstitutionalReport, validatePattern } from "../institutional-intelligence.js";
+import { BASKET_MARGIN_FRACTIONS, STRATEGY_VERSION, TIMEFRAMES, createSimulator, migrateSimulator, processSimulator } from "../simulator.js";
+import { WEIGHTS } from "../strategy.js";
+const parts=Object.fromEntries(Object.keys(WEIGHTS).map(k=>[k,.25]));
+const c=(time=1,closeTime=60000,open=100,high=101,low=99,close=100)=>({time,closeTime,open,high,low,close});
+const current=(score=80,ct=60000,price=100)=>Object.fromEntries(TIMEFRAMES.map(tf=>[tf,{long:score,short:100-score,close:price,closeTime:ct,parts,hist:.1,rsi:50}]));
+const open=(score=80)=>{const s=createSimulator();processSimulator(s,current(score),{"1m":[c()]});return s;};
+function canonicalFull(side="long") {const s=open(side==="long"?80:20),p=s.position;p.legs=[];p.totalMargin=p.totalNotional=p.entryFeesPaid=p.feesPaid=0;BASKET_MARGIN_FRACTIONS.forEach((f,i)=>{const margin=1000*f,notional=margin*10,fillPrice=side==="long"?100+i:100-i,entryFee=notional*.002,rawPrice=side==="long"?fillPrice/1.001:fillPrice/.999;p.legs.push({index:i+1,marginFraction:f,margin,leverage:10,notional,remainingNotional:notional,fillPrice,rawPrice,time:60000,entryFee,zoneEvidence:null});p.totalMargin+=margin;p.totalNotional+=notional;p.entryFeesPaid+=entryFee;p.feesPaid+=entryFee;});p.remainingNotional=p.totalNotional;p.remainingFraction=1;p.weightedAverage=p.legs.reduce((n,l)=>n+l.fillPrice*l.notional,0)/p.totalNotional;p.entry=p.weightedAverage;p.capital=p.totalMargin;s.bank=1000-p.entryFeesPaid;return migrateSimulator(JSON.parse(JSON.stringify(s)));}
 
-const parts = { rsi:.2, macd:.2, volume:.2, bands:.2, emaTrend:.2, ema50:.2 };
-const current = (score, closeTime, close=100) => Object.fromEntries(TIMEFRAMES.map(tf => [tf, { long:score, short:100-score, parts, close, closeTime }]));
-const candle = closeTime => ({ time:closeTime-59999, closeTime, open:100, high:101, low:99, close:100 });
-const rows = closeTime => ({ "1m":[candle(closeTime)] });
+test("terminal 1m identity mismatch fails closed",()=>{const s=createSimulator();const m=current();m["1m"].closeTime=59999;assert.equal(processSimulator(s,m,{"1m":[c()]}).invalidData,true);assert.equal(s.position,null);});
+test("future 5m context fails closed",()=>{const s=createSimulator(),m=current();m["5m"].closeTime=60001;assert.equal(processSimulator(s,m,{"1m":[c()]}).invalidData,true);});
+test("stale 5m context fails closed",()=>{const s=createSimulator(),m=current();m["5m"].closeTime=1;const bar=c(300001,360000);Object.values(m).forEach(x=>x.closeTime=360000);m["5m"].closeTime=1;assert.equal(processSimulator(s,m,{"1m":[bar]}).invalidData,true);});
+test("weak setup requires fresh macro available at decision",()=>{const weak=current(70);for(const macro of [undefined,{score:90,stale:true,availableFrom:1},{score:90,stale:false,availableFrom:60001},{score:90,stale:false,availableFrom:1-1800001}]){const s=createSimulator();processSimulator(s,weak,{"1m":[c()]},{macroSnapshot:macro});assert.equal(s.position,null);}const s=createSimulator();processSimulator(s,weak,{"1m":[c()]},{macroSnapshot:{score:90,stale:false,availableFrom:59000}});assert.ok(s.position);});
+test("macro score below 80 cannot enable weak setup",()=>{const s=createSimulator();processSimulator(s,current(70),{"1m":[c()]},{macroSnapshot:{score:79,stale:false,availableFrom:59000}});assert.equal(s.position,null);});
+test("first leg modeled liquidation is remote and does not mimic an 0.8% loss stop",()=>{const p=open().position;assert.ok(p.liquidationBoundary>0&&p.liquidationBoundary<10);assert.ok(p.riskBoundary<p.weightedAverage*.1);});
+test("full long risk boundary dominates modeled liquidation",()=>{const p=canonicalFull("long").position;assert.ok(p.riskBoundary>p.liquidationBoundary);assert.ok(p.riskBoundary>90);});
+test("full short risk boundary dominates modeled liquidation",()=>{const p=canonicalFull("short").position;assert.ok(p.riskBoundary<p.liquidationBoundary);assert.ok(p.riskBoundary<110);});
+test("pre-add gap closes immutable basket without charging next leg",()=>{const s=canonicalFull(),p=s.position;p.legs=p.legs.slice(0,3);p.totalMargin=70;p.totalNotional=700;p.remainingNotional=700;p.pendingAdd={confirmedAt:60000,referencePrice:95,zone:{id:"ema",level:95}};const before=p.legs.length,fees=p.entryFeesPaid;processSimulator(s,current(80,120000,80),{"1m":[c(60001,120000,80,81,79,80)]});assert.equal(s.position,null);assert.equal(s.trades[0].legs.length,before);assert.equal(s.trades[0].entryFeesPaid,fees);});
+test("same-version migration recomputes forged totals and weighted average",()=>{const s=canonicalFull();s.position.totalNotional=9;s.position.totalMargin=9;s.position.weightedAverage=999;migrateSimulator(s);const m=migrateSimulator(s);assert.equal(m.position.totalNotional,1500);assert.equal(m.position.totalMargin,150);assert.notEqual(m.position.weightedAverage,999);});
+test("same-version malformed remaining leg drops basket fail closed",()=>{const s=canonicalFull();s.position.legs[0].remainingNotional=Infinity;assert.equal(migrateSimulator(s).position,null);});
+test("JSON roundtrip preserves canonical open basket after add",()=>{const s=canonicalFull();const m=migrateSimulator(JSON.parse(JSON.stringify(s)));assert.equal(m.position.legs.length,4);assert.equal(m.position.remainingNotional,1500);assert.ok(Number.isFinite(m.position.riskBoundary));});
+test("JSON roundtrip reconstructs partial accounting rather than trusting aggregates",()=>{const s=canonicalFull(),p=s.position;p.structuralPartials=[{level:105,type:"ema",reason:"EMA 50",fraction:.25,executed:false}];processSimulator(s,current(80,120000,104),{"1m":[c(60001,120000,104,106,99,104)]});const expected={pnl:p.partials[0].pnl,fee:p.partials[0].fee,remaining:p.remainingNotional};s.bank=p.baselineEquity-p.entryFeesPaid+expected.pnl;const m=migrateSimulator(JSON.parse(JSON.stringify(s)));assert.ok(Math.abs(m.position.realizedPnl-expected.pnl)<1e-8);assert.ok(Math.abs(m.position.exitFeesPaid-expected.fee)<1e-8);assert.ok(Math.abs(m.position.remainingNotional-expected.remaining)<1e-8);});
+test("completed basket records canonical candidate and learning evidence",()=>{const s=canonicalFull();processSimulator(s,current(80,120000,99),{"1m":[c(60001,120000,100,101,80,99)]});const t=s.trades[0];assert.ok(Array.isArray(t.candidateIds));assert.deepEqual(Object.keys(t.learning.weightsBefore),Object.keys(WEIGHTS));assert.deepEqual(t.learning.weightsAfter,t.causalEvidence.expectedWeightsAfter);assert.equal(t.evidenceAvailability,"consistent-causal-evidence-v2");});
+test("global halt prevents weak macro enabled exposure",()=>{const s=createSimulator();s.bank=800;const r=processSimulator(s,current(70),{"1m":[c()]},{macroSnapshot:{score:99,stale:false,availableFrom:59000}});assert.equal(r.halted,true);assert.equal(s.position,null);});
+test("strategy version is persisted for schema isolation",()=>assert.equal(createSimulator().strategyVersion,STRATEGY_VERSION));
 
-test("weak 1m setup requires fresh high macro intensity and records immutable audit facts", () => {
-  const fresh=createSimulator();
-  processSimulator(fresh,current(70,120000),rows(120000),{now:120001,macroSnapshot:{score:80,updatedAt:119000,source:"calendar",stale:false}});
-  assert.ok(fresh.position); assert.equal(fresh.position.decisionSnapshot.macro.eligible,true);
-  assert.equal(fresh.position.decisionSnapshot.policy,"macro-intensity-eligibility-not-direction");
-  const stale=createSimulator(); processSimulator(stale,current(70,120000),rows(120000),{now:120001,macroSnapshot:{score:99,updatedAt:-2000000,source:"calendar",stale:false}}); assert.equal(stale.position,null);
-  const missing=createSimulator(); processSimulator(missing,current(70,120000),rows(120000),{now:120001}); assert.equal(missing.position,null); assert.equal(missing.decisionSnapshots[0].macro.status,"missing");
-});
+for(const [score,stale,offset,allowed] of [[80,false,-1,true],[100,false,-1800000,true],[80,true,-1,false],[79,false,-1,false],[100,false,1,false],[NaN,false,-1,false]])test(`macro causal boundary ${score}/${stale}/${offset}`,()=>{const sim=createSimulator();processSimulator(sim,current(70),{"1m":[c()]},{macroSnapshot:{score,stale,availableFrom:60000+offset}});assert.equal(Boolean(sim.position),allowed);});
+for(const [index,fraction] of BASKET_MARGIN_FRACTIONS.entries())test(`frozen tranche ${index+1} is ${fraction*100}%`,()=>{const p=canonicalFull().position,l=p.legs[index];assert.equal(l.margin,p.baselineEquity*fraction);assert.equal(l.notional,l.margin*10);assert.equal(l.index,index+1);});
+for(const side of ["long","short"])test(`${side} modeled liquidation and risk boundaries are finite`,()=>{const p=canonicalFull(side).position;assert.ok(Number.isFinite(p.riskBoundary)&&p.riskBoundary>0);assert.ok(Number.isFinite(p.liquidationBoundary)&&p.liquidationBoundary>0);assert.notEqual(p.riskBoundary,p.liquidationBoundary);});
+for(const [tf,maxAge] of [["5m",300000],["15m",900000],["1h",3600000]])test(`${tf} context accepts its exact freshness boundary`,()=>{const bar=c(4000001,4060000),m=current(80,4060000);m[tf].closeTime=4060000-maxAge;const sim=createSimulator();assert.notEqual(processSimulator(sim,m,{"1m":[bar]}).invalidData,true);});
+for(const side of ["long","short"])test(`${side} gap beyond hard boundary records cap overshoot honestly`,()=>{const sim=canonicalFull(side),price=side==="long"?50:150;processSimulator(sim,current(side==="long"?80:20,120000,price),{"1m":[c(60001,120000,price,price+1,price-1,price)]});assert.equal(sim.position,null);assert.ok(sim.trades[0].pnl < -100);});
+test("pattern candidates are frozen at first basket decision",()=>{const sim=createSimulator(),m=current();m["1m"]={...m["1m"],ema50:102,ema200:100,close:103};processSimulator(sim,m,{"1m":[c(1,60000,103,104,102,103)]});assert.ok(sim.position.candidateIds.includes("ema-alignment"));});
+test("indicator evolution advances only after completed basket",()=>{const sim=canonicalFull();const before=sim.learningSteps;processSimulator(sim,current(80,120000,99),{"1m":[c(60001,120000,100,101,80,99)]});assert.equal(sim.learningSteps,before+1);assert.equal(sim.learning.steps,sim.learningSteps);});
+test("executed partial history survives same-version JSON persistence",()=>{const sim=canonicalFull(),p=sim.position;p.structuralPartials=[{level:105,type:"ema",reason:"EMA 50",fraction:.25,executed:true,executedAt:2}];const m=migrateSimulator(JSON.parse(JSON.stringify(sim)));assert.equal(m.position.structuralPartials[0].executed,true);});
+test("modeled liquidation disclosure is fixed and exchange-qualified",()=>assert.match(open().position.liquidationPolicy,/Modeled cross-margin.*exchange-specific/i));
 
-test("migration retains newest thousand once, evicts 1001st and rebuilds learning fields", () => {
-  const trades=Array.from({length:1001},(_,i)=>({side:"long",entry:100,net:i/100000,pnl:1,exitTime:1001-i,parts,learning:{weightsAfter:{rsi:999}}}));
-  const migrated=migrateSimulator({bank:1000,weights:{rsi:15,macd:22,volume:13,bands:15,emaTrend:20,ema50:15},trades});
-  assert.equal(TOTAL_MEMORY,1000); assert.equal(RECENT_MEMORY,100); assert.equal(migrated.trades.length,1000);
-  assert.equal(migrated.trades[0].exitTime,1001); assert.equal(migrated.trades.at(-1).exitTime,2);
-  assert.equal(migrated.trades.some(t=>t.exitTime===1),false); assert.equal(migrated.trades[0].evidenceAvailability,"unavailable-after-migration");
-  assert.equal(migrated.trades[0].learning,undefined);
-});
 
-test("migration sorts by validated completion time before capping with stable ties", () => {
-  const trades=Array.from({length:1001},(_,i)=>({side:"long",entry:100,net:.01,pnl:1,exitTime:i+1,marker:i}));
-  trades.push({side:"long",entry:100,net:.01,pnl:1,exitTime:1001,marker:"stable-tie"},{side:"long",entry:100,net:.01,pnl:1,exitTime:NaN,marker:"invalid"});
-  const migrated=migrateSimulator({bank:1000,weights:{rsi:15,macd:22,volume:13,bands:15,emaTrend:20,ema50:15},trades});
-  assert.equal(migrated.trades.length,1000); assert.equal(migrated.trades[0].marker,1000);
-  assert.equal(migrated.trades[1].marker,"stable-tie"); assert.equal(migrated.trades.at(-1).exitTime,3);
-  assert.equal(migrated.trades.some(t=>t.marker==="invalid"||t.exitTime===1),false);
-});
+function withHonestPartial(){const sim=canonicalFull(),p=sim.position;p.structuralPartials=[{level:105,type:"ema",reason:"EMA 50",fraction:.25,executed:false}];processSimulator(sim,current(80,120000,104),{"1m":[c(60001,120000,104,106,99,104)]});return sim;}
+test("missing canonical entryFee drops persisted basket",()=>{const sim=canonicalFull();delete sim.position.legs[0].entryFee;assert.equal(migrateSimulator(sim).position,null);});
+test("NaN canonical entryFee drops persisted basket",()=>{const sim=canonicalFull();sim.position.legs[0].entryFee=NaN;assert.equal(migrateSimulator(sim).position,null);});
+test("injected million partial PnL is rejected",()=>{const sim=withHonestPartial();sim.position.partials[0].pnl=1e6;assert.equal(migrateSimulator(sim).position,null);});
+test("duplicate execution slice is rejected",()=>{const sim=withHonestPartial();sim.position.partials.push(structuredClone(sim.position.partials[0]));assert.equal(migrateSimulator(sim).position,null);});
+test("overclose allocation is rejected",()=>{const sim=withHonestPartial();sim.position.partials[0].allocations[0].closedNotional=1e9;assert.equal(migrateSimulator(sim).position,null);});
+test("negative execution allocation is rejected",()=>{const sim=withHonestPartial();sim.position.partials[0].allocations[0].closedNotional=-1;assert.equal(migrateSimulator(sim).position,null);});
+test("partial remaining-state mismatch is rejected",()=>{const sim=withHonestPartial();sim.position.legs[0].remainingNotional+=1;assert.equal(migrateSimulator(sim).position,null);});
+test("persisted bank mismatch is rejected rather than normalized",()=>{const sim=withHonestPartial();sim.bank+=1;const m=migrateSimulator(sim);assert.equal(m.position,null);assert.equal(m.bank,1000);});
 
-test("migration discards forged causal attribution and cannot manufacture weights or pattern compatibility", () => {
-  const forged=Array.from({length:100},(_,i)=>({side:"long",entry:100,exitTime:100-i,net:.05,pnl:5,
-    parts:{rsi:1},candidateIds:["ema-alignment"],decisionSnapshot:{candidateIds:["ema-alignment"],parts:{rsi:1}},learning:{weightsAfter:{rsi:999}}}));
-  const migrated=migrateSimulator({bank:1000,weights:{rsi:15,macd:22,volume:13,bands:15,emaTrend:20,ema50:15},trades:forged});
-  assert.deepEqual(migrated.weights,weightsFromTradeMemory([])); assert.ok(migrated.trades.every(t=>Object.keys(t.parts).length===0&&t.candidateIds.length===0));
-  assert.ok(migrated.trades.every(t=>t.evidenceAvailability==="unavailable-after-migration"&&!t.decisionSnapshot));
-  const candidate={id:"ema-alignment",name:"ema",occurrences:100,outcomes:100,netExpectancyAfterCosts:.05,successRate:1,noLookahead:true};
-  assert.equal(validatePattern(candidate,migrated.trades).status,"insufficient evidence");
-});
+test("completed final slice survives audited JSON roundtrip",()=>{const sim=canonicalFull();processSimulator(sim,current(80,120000,99),{"1m":[c(60001,120000,100,101,80,99)]});const expected=sim.trades[0].pnl,m=migrateSimulator(JSON.parse(JSON.stringify(sim)));assert.equal(m.trades.length,1);assert.ok(Math.abs(m.trades[0].pnl-expected)<1e-8);assert.equal(m.trades[0].partials.at(-1).reason,sim.trades[0].reason);});
 
-test("valid canonical causal evidence survives a storage round trip", () => {
-  const simulator=createSimulator();
-  processSimulator(simulator,current(90,60000),rows(60000),{now:60001});
-  const stopped={"1m":[{time:60001,closeTime:120000,open:100,high:103,low:97,close:98}]};
-  processSimulator(simulator,current(90,120000,98),stopped,{now:120001});
-  assert.equal(simulator.trades.length,1); assert.equal(simulator.trades[0].causalEvidence.version,1);
-  const migrated=migrateSimulator(JSON.parse(JSON.stringify(simulator)),130000);
-  assert.equal(migrated.trades[0].evidenceAvailability,"consistent-causal-evidence-v1");
-  assert.deepEqual(migrated.trades[0].candidateIds,simulator.trades[0].candidateIds);
-  assert.deepEqual(migrated.weights,simulator.weights);
-});
+for(const side of ["long","short"])test(`${side} tampered entry fill is rejected despite plausible costs`,()=>{const sim=canonicalFull(side);sim.position.legs[0].fillPrice+=.01;assert.equal(migrateSimulator(sim).position,null);});
+for(const side of ["long","short"])test(`${side} coordinated exit raw/fill tamper is rejected`,()=>{const sim=withHonestPartial();if(side==="short"){const shortSim=canonicalFull("short"),p=shortSim.position;p.structuralPartials=[{level:95,type:"ema",reason:"EMA 50",fraction:.25,executed:false}];processSimulator(shortSim,current(20,120000,96),{"1m":[c(60001,120000,96,100,94,96)]});Object.assign(sim,shortSim);}const slice=sim.position.partials[0];slice.rawPrice+=1;slice.fillPrice+=1;slice.price=slice.fillPrice;assert.equal(migrateSimulator(sim).position,null);});
+for(const side of ["long","short"])test(`${side} honest canonical execution prices survive JSON roundtrip`,()=>{const sim=canonicalFull(side),m=migrateSimulator(JSON.parse(JSON.stringify(sim)));assert.ok(m.position);assert.equal(m.position.side,side);});
 
-test("a broken causal record is rejected without poisoning later valid records", () => {
-  const chronological=[];
-  for(let i=1;i<=3;i+=1){
-    const before=weightsFromTradeMemory(chronological.slice().reverse());
-    const trade={side:"long",entry:100,exitTime:i,net:.01,pnl:1,parts:{...parts},candidateIds:["ema-alignment"]};
-    chronological.push(trade);
-    trade.causalEvidence={version:1,parts:{...parts},candidateIds:["ema-alignment"],weightsBefore:before,expectedWeightsAfter:weightsFromTradeMemory(chronological.slice().reverse())};
-  }
-  chronological[1].causalEvidence.expectedWeightsAfter.rsi=999;
-  const migrated=migrateSimulator({bank:1000,weights:{rsi:15,macd:22,volume:13,bands:15,emaTrend:20,ema50:15},trades:chronological.slice().reverse()});
-  assert.equal(migrated.trades.find(t=>t.exitTime===2).evidenceAvailability,"unavailable-after-migration");
-  assert.equal(migrated.trades.find(t=>t.exitTime===3).evidenceAvailability,"consistent-causal-evidence-v1");
-});
-
-test("self-consistent forged local chain is labeled consistency-only, never authentic", () => {
-  const forgedParts={...parts,rsi:1};
-  const trade={side:"long",entry:100,exitTime:1,net:.05,pnl:5,parts:forgedParts,candidateIds:["ema-alignment"]};
-  trade.causalEvidence={version:1,parts:forgedParts,candidateIds:["ema-alignment"],weightsBefore:weightsFromTradeMemory([]),expectedWeightsAfter:weightsFromTradeMemory([trade])};
-  const migrated=migrateSimulator({bank:1000,weights:weightsFromTradeMemory([trade]),trades:[trade]});
-  assert.equal(migrated.trades[0].evidenceAvailability,"consistent-causal-evidence-v1");
-  const report=buildInstitutionalReport({simulator:migrated});
-  assert.match(report.replace(/[│\n]/g," "),/authenticity requires a trusted\s+backend/i);
-  assert.doesNotMatch(`${migrated.trades[0].evidenceAvailability}\n${report}`,/verified|tamper-proof/i);
-});
-
-test("two-horizon weights prioritize recent losses and loss response exceeds one win", () => {
-  const make=net=>({side:"long",net,parts:{...parts,rsi:1}});
-  const base=weightsFromTradeMemory([]).rsi;
-  const win=Math.abs(weightsFromTradeMemory([make(.01)]).rsi-base);
-  const loss=Math.abs(weightsFromTradeMemory([make(-.01)]).rsi-base);
-  assert.ok(loss>win);
-  const contradictory=[...Array.from({length:100},()=>make(-.02)),...Array.from({length:900},()=>make(.02))];
-  assert.ok(weightsFromTradeMemory(contradictory).rsi<base);
-});
-
-test("thousand-trade migration remains synchronous and bounded", () => {
-  const trades=Array.from({length:1000},(_,i)=>({side:"long",entry:100,exitTime:1000-i,net:i%2?.01:-.01,pnl:1,parts}));
-  const start=performance.now(); migrateSimulator({bank:1000,weights:{rsi:15,macd:22,volume:13,bands:15,emaTrend:20,ema50:15},trades});
-  assert.ok(performance.now()-start<1000);
-});
-
-test("server-shaped updatedAt becomes availableFrom: same prior candle denied, next exact candle allowed", () => {
-  const payload={score:90,updatedAt:90000,source:"Investing.com",stale:false};
-  const snapshot={...payload,availableFrom:payload.updatedAt};
-  const prior=createSimulator(); processSimulator(prior,current(70,60000),rows(60000),{now:90001,macroSnapshot:snapshot}); assert.equal(prior.position,null);
-  const next=createSimulator(); processSimulator(next,current(70,120000),rows(120000),{now:120001,macroSnapshot:snapshot}); assert.ok(next.position);
-  snapshot.calculatedAt=119999; processSimulator(next,current(70,180000),rows(180000),{now:180001,macroSnapshot:snapshot}); assert.equal(snapshot.availableFrom,90000);
-});
-
-test("closed 1m evaluation is exact-once and an open candle is rejected", () => {
-  const simulator=createSimulator();
-  const open=processSimulator(simulator,current(90,120000),rows(120000),{now:120000}); assert.equal(open.duplicateOrOpen,true); assert.equal(simulator.position,null);
-  processSimulator(simulator,current(90,120000),rows(120000),{now:120001}); const snapshotCount=simulator.decisionSnapshots.length;
-  const duplicate=processSimulator(simulator,current(90,120000),rows(120000),{now:120002}); assert.equal(duplicate.duplicateOrOpen,true); assert.equal(simulator.decisionSnapshots.length,snapshotCount);
-});
-
-test("20% capital circuit closes exposure, blocks exposure and migration ignores forged clear state", () => {
-  const simulator=createSimulator(); processSimulator(simulator,current(90,60000),rows(60000),{now:60001});
-  simulator.bank=790; const result=processSimulator(simulator,current(90,120000,100),rows(120000),{now:120001});
-  assert.equal(result.riskHalt,true); assert.equal(simulator.position,null); assert.equal(simulator.riskControl.halted,true); assert.equal(simulator.pendingReversal,null);
-  processSimulator(simulator,current(90,180000),rows(180000),{now:180001}); assert.equal(simulator.position,null);
-  const migrated=migrateSimulator({...simulator,riskControl:{halted:false,threshold:0}} ,200000); assert.equal(migrated.riskControl.halted,true); assert.equal(migrated.riskControl.threshold,800);
-  const reset=createSimulator(); assert.equal(reset.riskControl.halted,false); assert.equal(reset.bank,1000);
-});
-
-test("final realization that breaches threshold latches before same-candle reversal", () => {
-  const simulator=createSimulator(); processSimulator(simulator,current(90,60000),rows(60000),{now:60001}); simulator.bank=810;
-  const stop={time:60001,closeTime:120000,open:100,high:103,low:97,close:98};
-  processSimulator(simulator,current(10,120000,98),{"1m":[stop]},{now:120001});
-  assert.equal(simulator.riskControl.halted,true); assert.equal(simulator.pendingReversal,null); assert.equal(simulator.position,null);
-});
-
-test("report UI uses safe textContent and responsive page overflow contract", async () => {
-  const [app,css,html]=await Promise.all([readFile(new URL("../app.js",import.meta.url),"utf8"),readFile(new URL("../styles.css",import.meta.url),"utf8"),readFile(new URL("../index.html",import.meta.url),"utf8")]);
-  assert.match(app,/report\.textContent\s*=\s*buildInstitutionalReport/); assert.doesNotMatch(app,/institutionalReport[^\n]*innerHTML/);
-  assert.match(css,/html,body\{max-width:100%;overflow-x:hidden\}/); assert.match(css,/\.institutional-report\{[^}]*white-space:pre-wrap/); assert.match(css,/@media\(max-width:620px\)[^{]*\{\.institutional-report-card/);
-  assert.match(html,/<pre id="institutionalReport"/); assert.match(html,/Reiniciar banca, memoria y bloqueo/);
-});
-
+for(const side of ["long","short"])test(`${side} intrabar chooses first reachable hard-risk boundary`,()=>{const sim=canonicalFull(side),p=sim.position,bar=side==="long"?c(60001,120000,100,110,p.liquidationBoundary-1,105):c(60001,120000,100,p.liquidationBoundary+1,90,95);processSimulator(sim,current(side==="long"?80:20,120000,bar.close),{"1m":[bar]});assert.equal(sim.position,null);assert.equal(sim.trades[0].reason,"Hard basket loss boundary");assert.ok(Math.abs(sim.bank-p.effectiveFloor)<1e-8);});
+for(const side of ["long","short"])test(`${side} intrabar chooses modeled liquidation when it is first reachable`,()=>{const sim=canonicalFull(side),p=sim.position;p.effectiveFloor=0;const boundary=p.liquidationBoundary,bar=side==="long"?c(60001,120000,100,120,boundary-.1,115):c(60001,120000,100,boundary+.1,80,85);processSimulator(sim,current(side==="long"?80:20,120000,bar.close),{"1m":[bar]});assert.equal(sim.trades[0].reason,"Modeled cross-margin liquidation intrabar");assert.ok(Math.abs(sim.trades[0].partials.at(-1).fillPrice-boundary)<1e-8);});
+test("first reachable risk boundary wins dual hit before favorable partial",()=>{const sim=canonicalFull("long"),p=sim.position;p.structuralPartials=[{level:110,type:"ema",reason:"EMA 50",fraction:.25,executed:false}];processSimulator(sim,current(80,120000,105),{"1m":[c(60001,120000,100,115,p.liquidationBoundary-1,105)]});assert.equal(sim.trades[0].reason,"Hard basket loss boundary");assert.equal(sim.trades[0].partials.length,1);assert.equal(sim.trades[0].partials[0].reason,"Hard basket loss boundary");});
+test("non-hit candle leaves basket open without synthetic liquidation",()=>{for(const side of ["long","short"]){const sim=canonicalFull(side),p=sim.position,bar=side==="long"?c(60001,120000,100,103,p.riskBoundary+1,101):c(60001,120000,100,p.riskBoundary-1,97,99);processSimulator(sim,current(side==="long"?80:20,120000,bar.close),{"1m":[bar]});assert.ok(sim.position);assert.equal(sim.trades.length,0);}});

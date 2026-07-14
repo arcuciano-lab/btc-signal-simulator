@@ -49,8 +49,8 @@ test("dashboard ships a fixed 120-candle chart, default MACD, and one signal ban
   assert.match(app, /const VISIBLE_CANDLE_COUNT = 120;/);
   assert.match(app, /macd:true/);
   assert.match(app, /btc-signal-simulator-v3/);
-  assert.match(app, /leverageReason/);
-  assert.match(app, /estimated fees and slippage on.*notional/);
+  assert.match(app, /FIXED 10x/);
+  assert.match(app, /gaps or synthetic liquidation can exceed it/);
   assert.doesNotMatch(app, /loadNewsBanner|CANDLE_COUNT_KEY/);
 });
 

@@ -2,8 +2,9 @@ import { analyze } from "./strategy.js";
 import { calculateMacroImpact, classifyMacroEventScore, scoreMacroEvent } from "./macro-impact.js";
 import { createSimulator, getConsensus, getMarkToMarket, isValidCandle, migrateSimulator, processSimulator as updateSimulator, TIMEFRAMES } from "./simulator.js";
 import { buildInstitutionalReport, buildPatternEvidence, validatePattern } from "./institutional-intelligence.js";
-const SIM_KEY = "btc-signal-simulator-v4";
-const LEGACY_SIM_KEYS = ["btc-signal-simulator-v3", "btc-signal-simulator-v2", "btc-signal-simulator-v1"];
+const SIM_KEY = "btc-signal-simulator-v6";
+// Legacy leverageReason payloads are intentionally ignored by the v6 reset.
+const LEGACY_SIM_KEYS = ["btc-signal-simulator-v5", "btc-signal-simulator-v4", "btc-signal-simulator-v3", "btc-signal-simulator-v2", "btc-signal-simulator-v1"];
 const CHART_KEY = "btc-chart-indicators-v2";
 const VISIBLE_CANDLE_COUNT = 120;
 const MARKET_HISTORY_LIMIT = 320;
@@ -124,7 +125,10 @@ function loadSimulator() {
       const serialized = localStorage.getItem(key);
       if (!serialized) continue;
       const simulator = migrateSimulator(JSON.parse(serialized));
-      try { localStorage.setItem(SIM_KEY, JSON.stringify(simulator)); } catch {}
+      try {
+        localStorage.setItem(SIM_KEY, JSON.stringify(simulator));
+        LEGACY_SIM_KEYS.forEach(legacyKey => localStorage.removeItem(legacyKey));
+      } catch {}
       return simulator;
     } catch {}
   }
@@ -250,8 +254,9 @@ function renderSimulator() {
   if (sim.position) {
     const p = sim.position;
     $("openPosition").className = `open-position ${p.side}`;
-    const plans=(p.structuralPartials||[]).map(level=>`${level.executed?"FILLED":"PLANNED"} ${money(level.level)} (${level.reason})`).join(" · ") || "No valid structural level ahead";
-    $("openPosition").innerHTML = `<div><span>${p.dataGap||state.staleData?"POSITION PAUSED":"OPEN POSITION"}</span><strong>${p.side.toUpperCase()} · ${money(p.entry)} · ${p.leverage}x</strong><small>${escapeHtml(state.staleData?"Stale aligned snapshot; no trading":leverageExplanation(p))}</small></div><div><span>REMAINING SIZE</span><strong>${number(p.remainingFraction*100,0)}%${p.partialTaken?" · PARTIAL TAKEN":""}</strong><small>10x is the minimum policy, not low risk. The 2% budget covers the estimated normal stop; gaps or liquidation can lose more.</small><small>${plans}</small></div><div><span>REALIZED P&amp;L</span><strong class="${p.realizedPnl>=0?"positive":"negative"}">${p.realizedPnl>=0?"+":""}${money(p.realizedPnl,2)}</strong></div><div><span>UNREALIZED P&amp;L</span><strong class="${mark.pnl>=0?"positive":"negative"}">${mark.pnl>=0?"+":""}${money(mark.pnl,2)} · ${number(mark.pct)}% estimated ROI</strong><small>${number(mark.assetReturn)}% asset return · estimated fees and slippage on ${p.leverage}x notional</small></div>`;
+    const plans = (p.structuralPartials || []).map(level => `${level.executed ? "FILLED" : "PLANNED"} ${money(level.level)} (${level.reason})`).join(" ? ") || "No structural partial currently planned";
+    const legs = p.legs.map(leg => `#${leg.index} ${number(leg.marginFraction * 100, 0)}% ? ${money(leg.margin)} margin ? ${money(leg.fillPrice)}`).join(" ? ");
+    $("openPosition").innerHTML = `<div><span>${p.dataGap || state.staleData ? "BASKET PAUSED" : "OPEN BASKET"}</span><strong>${p.side.toUpperCase()} ? AVG ${money(p.weightedAverage)} ? FIXED 10x</strong><small>${escapeHtml(legs)}</small></div><div><span>LEGS / REMAINING</span><strong>${p.legs.length}/4 ? ${number(p.remainingFraction * 100, 0)}%</strong><small>${escapeHtml(p.pendingAdd ? `NEXT LEG QUEUED FOR NEXT 1m OPEN ? ${number(p.pendingAdd.marginFraction * 100, 0)}%` : "Adds require a new confirmed adverse bounce zone")}</small><small>${escapeHtml(plans)}</small></div><div><span>REALIZED / HARD RISK</span><strong class="${p.realizedPnl >= 0 ? "positive" : "negative"}">${p.realizedPnl >= 0 ? "+" : ""}${money(p.realizedPnl, 2)}</strong><small>Boundary ${money(p.riskBoundary)} ? floor ${money(p.effectiveFloor, 2)} ? no ordinary SL</small></div><div><span>CURRENT NET P&amp;L</span><strong class="${mark.pnl >= 0 ? "positive" : "negative"}">${mark.pnl >= 0 ? "+" : ""}${money(mark.pnl, 2)}</strong><small>Target cap is 10% of basket-start equity; gaps or synthetic liquidation can exceed it.</small></div>`;
   } else {
     $("openPosition").className = "open-position waiting";
     $("openPosition").innerHTML = sim.pendingReversal
@@ -270,7 +275,7 @@ function renderSimulator() {
     report.textContent = buildInstitutionalReport({ market, simulator: sim, macroSnapshot: state.macroSnapshot, patterns });
   }
   const status = $("institutionalStatus");
-  if (status) status.textContent = sim.riskControl?.halted ? "RISK HALT" : `BOUNDED RECALIBRATION · ${Math.min(sim.trades.length, 10)}/10`;
+  if (status) status.textContent = sim.riskControl?.halted ? "RISK HALT" : `RECENT ${Math.min(sim.trades.length, 100)}/100 · TOTAL ${Math.min(sim.trades.length, 1000)}/1000`;
   $("simUpdated").textContent = `Actualiza cada 60 s · ${new Date().toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"})}`;
 }
 
@@ -313,12 +318,6 @@ function renderTradeHistory(trades) {
   }
 }
 
-function leverageExplanation(position) {
-  const decision = position.leverageDecision;
-  if (!decision?.caps) return position.leverageReason || "Conservative leverage";
-  const circuit = decision.circuitReason ? `; circuit: ${decision.circuitReason}` : "";
-  return `${decision.bindingCap} cap selected ${position.leverage}x${circuit}`;
-}
 
 function formatDate(time) {
   return new Date(time).toLocaleString("es-ES", { day:"2-digit", month:"2-digit", year:"2-digit", hour:"2-digit", minute:"2-digit" });
@@ -354,7 +353,7 @@ function drawPriceChart(rows) {
   const axisW=70, plotW=Math.max(100,W-axisW), chartH=H-22;
   const sets=[{v:rows.map(r=>r.ema50),c:"#ffe600",w:1.4},{v:rows.map(r=>r.ema200),c:"#ff3567",w:1.4}];
   const bandValues=state.chartIndicators.bollinger?rows.flatMap(r=>[r.bbUpper,r.bbLower]):[];
-  const trade=state.simulator.position,tradeLevels=trade?[trade.entry]:[];
+  const trade=state.simulator.position,tradeLevels=trade?[trade.weightedAverage,trade.riskBoundary,trade.liquidationBoundary,...trade.legs.map(leg=>leg.fillPrice)]:[];
   const all=[...rows.flatMap(r=>[r.high,r.low]),...sets.flatMap(s=>s.v),...bandValues,...tradeLevels,...(trade?.structuralPartials||[]).map(p=>p.level)].filter(Number.isFinite), rawMin=Math.min(...all), rawMax=Math.max(...all), pad=(rawMax-rawMin)*.08||1, min=rawMin-pad,max=rawMax+pad;
   ctx.strokeStyle="#182127";ctx.lineWidth=1;
   for(let i=0;i<=4;i++){const gy=chartH*i/4;ctx.beginPath();ctx.moveTo(0,gy);ctx.lineTo(plotW,gy);ctx.stroke()}
@@ -379,14 +378,15 @@ function drawPriceChart(rows) {
 
 function drawOpenTradeLine(ctx,rows,min,max,W,H,slot){
   const trade=state.simulator.position;if(!trade)return;
-  const color=trade.side==="long"?"#00f5a0":"#ff3567",lineY=H-(trade.entry-min)/(max-min)*H,target=trade.side==="long"?trade.entry*1.05:trade.entry*.95,stop=trade.side==="long"?trade.entry*.975:trade.entry*1.025,rawTargetY=H-(target-min)/(max-min)*H,rawStopY=H-(stop-min)/(max-min)*H,targetY=clamp(rawTargetY,3,H-3),stopY=clamp(rawStopY,3,H-3);
+  const color=trade.side==="long"?"#00f5a0":"#ff3567",lineY=H-(trade.weightedAverage-min)/(max-min)*H,riskY=clamp(H-(trade.riskBoundary-min)/(max-min)*H,3,H-3),liquidationY=clamp(H-(trade.liquidationBoundary-min)/(max-min)*H,3,H-3);
   const entryIndex=rows.findIndex(r=>r.closeTime>=trade.entryTime),startX=entryIndex>=0?(entryIndex+.5)*slot:0;
   ctx.save();
-  ctx.fillStyle="#00f5a00d";ctx.fillRect(startX,Math.min(lineY,targetY),W-startX,Math.abs(targetY-lineY));ctx.fillStyle="#ff35670d";ctx.fillRect(startX,Math.min(lineY,stopY),W-startX,Math.abs(stopY-lineY));
-  drawTradeLevel(ctx,startX,W,targetY,"#00f5a0",`TP +5% asset · est. +${number(4.7*trade.leverage,1)}% ROI${rawTargetY<0?" ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬Ëœ":rawTargetY>H?" ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬Å“":""}`,[3,5],1);
-  drawTradeLevel(ctx,startX,W,stopY,"#ff3567",`SL ÃƒÂ¢Ã‹â€ Ã¢â‚¬â„¢2.5% asset · est. ÃƒÂ¢Ã‹â€ Ã¢â‚¬â„¢${number(2.8*trade.leverage,1)}% ROI${rawStopY<0?" ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬Ëœ":rawStopY>H?" ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬Å“":""}`,[3,5],1);
-  drawTradeLevel(ctx,startX,W,lineY,color,`SIM ${trade.side.toUpperCase()} · ENTRADA ${money(trade.entry)}`,[8,5],1.6,true);
-  (trade.structuralPartials||[]).forEach(plan=>{const py=clamp(H-(plan.level-min)/(max-min)*H,3,H-3);drawTradeLevel(ctx,startX,W,py,plan.executed?"#71808b":"#ffcc00",`${plan.executed?"FILLED":"PARTIAL 25%"} · ${plan.reason} · ${money(plan.level)}`,[2,4],1)});
+  ctx.fillStyle="#ff35670d";ctx.fillRect(startX,Math.min(lineY,riskY),W-startX,Math.abs(riskY-lineY));
+  drawTradeLevel(ctx,startX,W,riskY,"#ff3567",`HARD BASKET RISK ? ${money(trade.riskBoundary)} ? NO ORDINARY SL`,[3,5],1);
+  drawTradeLevel(ctx,startX,W,liquidationY,"#a855f7",`MODELED CROSS-MARGIN LIQUIDATION ? ${money(trade.liquidationBoundary)}`,[2,6],1);
+  drawTradeLevel(ctx,startX,W,lineY,color,`SIM ${trade.side.toUpperCase()} ? WEIGHTED AVG ${money(trade.weightedAverage)} ? FIXED 10x`,[8,5],1.6,true);
+  trade.legs.forEach(leg=>{const y=clamp(H-(leg.fillPrice-min)/(max-min)*H,3,H-3);drawTradeLevel(ctx,startX,W,y,"#00d9ff",`LEG ${leg.index} ? ${number(leg.marginFraction*100,0)}% ? ${money(leg.fillPrice)}`,[2,5],1)});
+  (trade.structuralPartials||[]).forEach(plan=>{const py=clamp(H-(plan.level-min)/(max-min)*H,3,H-3);drawTradeLevel(ctx,startX,W,py,plan.executed?"#71808b":"#ffcc00",`${plan.executed?"FILLED":"PARTIAL 25%"} ? ${plan.reason} ? ${money(plan.level)}`,[2,4],1)});
   ctx.restore();
 }
 

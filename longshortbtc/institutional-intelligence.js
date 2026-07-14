@@ -111,7 +111,10 @@ export function buildInstitutionalReport({ market, simulator, macroSnapshot, pat
     `Archive baseline: ${memory.archiveCount}/900; positive results: ${memory.archiveWins}`,
     `Regime drift: ${finite(memory.drift) ? (memory.drift*100).toFixed(2)+"pp" : "insufficient samples"}`,
     "7. Evolutionary Recommendations", trades.length < RECENT_MEMORY ? "Preserve bounds until the priority window matures" : "Continue bounded two-horizon recalibration",
-    `Risk halt: ${halt}`, `Peak drawdown: ${finite(simulator?.leverageLearning?.drawdown) ? (simulator.leverageLearning.drawdown*100).toFixed(2)+"%" : "missing data"}`,
+    `Risk halt: ${halt}`, "Basket policy: fixed 10x; frozen 1% / 2% / 4% / 8% margin tranches",
+    "Basket target loss cap: 10% of basket-start equity including estimated costs",
+    "Liquidation model: synthetic cross-margin at 0.5% maintenance; exchange-specific reality may differ",
+    "Risk disclosure: no ordinary SL; hard -10% target kill-switch, but gaps or liquidation can exceed it",
     "Local state is advisory: consistency only; authenticity requires a trusted backend"
   ];
   const width = 78;
