@@ -3,6 +3,7 @@ const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const FORBIDDEN = /\b(compra|vende|venta|comprar|vender|entra|entrada|salir|salida|buy|sell|enter|entry|exit)\b/iu;
 export const TOTAL_MEMORY = 1000;
 export const RECENT_MEMORY = 100;
+const INDICATOR_ORDER = Object.freeze(["rsi", "macd", "volume", "bands", "emaTrend", "ema50"]);
 
 function horizonMean(trades, valueOf, decay = false) {
   let weighted = 0, total = 0;
@@ -77,7 +78,7 @@ export function buildPatternEvidence(rows, horizon = 5, modeledCost = .003) {
 
 function bar(value, width = 12) {
   const filled = Math.round(clamp(finite(value) ? value : 0, 0, 100) / 100 * width);
-  return `${"â–ˆ".repeat(filled)}${"â–‘".repeat(width - filled)}`;
+  return `${"\u2588".repeat(filled)}${"\u2591".repeat(width - filled)}`;
 }
 
 export function buildInstitutionalReport({ market, simulator, macroSnapshot, patterns = [] } = {}) {
@@ -85,8 +86,18 @@ export function buildInstitutionalReport({ market, simulator, macroSnapshot, pat
   const trades = allTrades.slice(0, RECENT_MEMORY);
   const memory = summarizeTradeMemory(allTrades);
   const weights = simulator?.weights || {};
-  const weightRows = Object.entries(weights).map(([key, value]) => `${key.toUpperCase().padEnd(9)} ${bar(value)} ${Math.round(value)}%`);
-  const evolution = Object.keys(weights).map(key => {
+  const validWeights = INDICATOR_ORDER.map(key => weights[key]).filter(finite);
+  const weightRows = INDICATOR_ORDER.map(key => {
+    const value = weights[key];
+    return finite(value)
+      ? `${key.toUpperCase().padEnd(9)} ${bar(value)} ${Math.round(value)}%`
+      : `${key.toUpperCase().padEnd(9)} missing data`;
+  });
+  const totalWeight = validWeights.length === INDICATOR_ORDER.length
+    ? validWeights.reduce((total, value) => total + value, 0)
+    : null;
+  weightRows.push(finite(totalWeight) ? `TOTAL     ${bar(totalWeight)} ${Math.round(totalWeight)}%` : "TOTAL     missing data");
+  const evolution = INDICATOR_ORDER.map(key => {
     const history = trades.map(t => t.learning?.weightsAfter?.[key]).filter(finite).reverse();
     return `${key.toUpperCase()}: ${history.length ? history.map(v => bar(v, 4)).join(" ") : "missing history"}`;
   });
@@ -94,10 +105,10 @@ export function buildInstitutionalReport({ market, simulator, macroSnapshot, pat
   const volume = market && finite(market.volRatio) ? `${market.volRatio.toFixed(2)}x baseline` : "missing data";
   const volatility = market && finite(market.bbUpper) && finite(market.bbLower) && market.close > 0 ? `${((market.bbUpper-market.bbLower)/market.close*100).toFixed(2)}% band width` : "missing data";
   const macroValid = macroSnapshot && finite(macroSnapshot.score) && finite(macroSnapshot.updatedAt) && macroSnapshot.stale !== true;
-  const macro = macroValid ? `${macroSnapshot.score}% Â· intensity only Â· ${macroSnapshot.source || "source missing"}` : "missing or stale data";
+  const macro = macroValid ? `${macroSnapshot.score}% \u00B7 intensity only \u00B7 ${macroSnapshot.source || "source missing"}` : "missing or stale data";
   const patternRows = patterns.length ? patterns.map(p => `${p.name}: ${p.status} (${p.outcomes}/${p.occurrences})`) : ["No validated candidates; insufficient evidence"];
   const tradeRows = trades.length ? trades.map((t, i) => `#${i + 1} result ${finite(t.net) ? (t.net*100).toFixed(2)+"%" : "missing"}; recalibration ${t.learning ? "audited" : "missing"}`) : ["No completed sample"];
-  const halt = simulator?.riskControl?.halted ? `ACTIVE Â· ${simulator.riskControl.reason || "capital protection"}` : "inactive";
+  const halt = simulator?.riskControl?.halted ? `ACTIVE \u00B7 ${simulator.riskControl.reason || "capital protection"}` : "inactive";
   const decisions = Array.isArray(simulator?.decisionSnapshots) ? simulator.decisionSnapshots.slice(0, 100) : [];
   const latestDivergence = decisions[0];
   const legacyDivergence = simulator?.position?.entryDecision?.auditStatus === "legacy-pre-divergence";

@@ -10,6 +10,32 @@ test("institutional report has all sections, bounded width and explicit missing 
   assert.equal(reportHasForbiddenVocabulary(report), false);
 });
 
+test("indicator weights render canonical Unicode bars, percentages and a 100 percent total", () => {
+  const weights = { rsi: 20, macd: 20, volume: 10, bands: 15, emaTrend: 25, ema50: 10 };
+  const report = buildInstitutionalReport({ simulator: { trades: [], weights, riskControl: {} } });
+  const expected = [
+    ["RSI", 2, 20], ["MACD", 2, 20], ["VOLUME", 1, 10],
+    ["BANDS", 2, 15], ["EMATREND", 3, 25], ["EMA50", 1, 10],
+    ["TOTAL", 12, 100]
+  ];
+
+  for (const [label, fills, percentage] of expected) {
+    const line = report.split("\n").find(row => row.startsWith(`| ${label}`) && row.includes("\u2588"));
+    assert.ok(line, `${label} row is present`);
+    assert.equal((line.match(/\u2588/g) || []).length, fills, `${label} fill count`);
+    assert.match(line, new RegExp(`\\s${percentage}%\\s`));
+  }
+  assert.doesNotMatch(report, /â|Â|NaN/);
+  assert.ok(report.split("\n").every(line => line.length === 78));
+});
+
+test("indicator weights disclose missing or non-finite metrics instead of deceptive values", () => {
+  const report = buildInstitutionalReport({ simulator: { trades: [], weights: { rsi: Number.NaN }, riskControl: {} } });
+  assert.match(report, /RSI\s+missing data/);
+  assert.match(report, /TOTAL\s+missing data/);
+  assert.doesNotMatch(report, /NaN%|â|Â/);
+});
+
 test("priority hundred dominates contradictory archive and archive cannot rescue pattern compatibility", () => {
   const recent=Array.from({length:100},()=>({net:-.01,candidateIds:["ema-alignment"]}));
   const archive=Array.from({length:900},()=>({net:.01,candidateIds:["ema-alignment"]}));

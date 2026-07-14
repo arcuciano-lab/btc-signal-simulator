@@ -3,6 +3,7 @@ import { calculateMacroImpact, classifyMacroEventScore, scoreMacroEvent } from "
 import { createSimulator, getConsensus, getMarkToMarket, isValidCandle, migrateSimulator, processSimulator as updateSimulator, TIMEFRAMES } from "./simulator.js";
 import { buildInstitutionalReport, buildPatternEvidence, validatePattern } from "./institutional-intelligence.js";
 import { calculateCandleBodyGeometry, calculateCandlePriceDomain, projectPriceLevel, selectVisibleCandles } from "./price-chart.js";
+import { formatVolumeRatio, formatWinRate, getVolumeConfirmationLabel } from "./dashboard-format.js";
 const SIM_KEY = "btc-signal-simulator-v6";
 // Legacy leverageReason payloads are intentionally ignored by the v6 reset.
 const LEGACY_SIM_KEYS = ["btc-signal-simulator-v5", "btc-signal-simulator-v4", "btc-signal-simulator-v3", "btc-signal-simulator-v2", "btc-signal-simulator-v1"];
@@ -230,9 +231,9 @@ function renderMetrics(c) {
   const data = [
     ["RSI · 14", number(c.rsi,1), weights.rsi, c.parts.rsi, c.rsi>55?"Impulso comprador":c.rsi<45?"Impulso vendedor":"En equilibrio"],
     ["MACD · 12/26/9", `${c.hist>=0?"+":""}${number(c.hist,2)}`, weights.macd, c.parts.macd, c.hist>=0?"Momentum positivo":"Momentum negativo"],
-    ["Volumen / media", `${number(c.volRatio,2)}ÃƒÆ’Ã¢â‚¬â€`, weights.volume, c.parts.volume, c.volRatio>=1.1?"Volumen confirma":"ConfirmaciÃƒÆ’Ã‚Â³n dÃƒÆ’Ã‚Â©bil"],
+    ["Volumen / media", formatVolumeRatio(c.volRatio), weights.volume, c.parts.volume, getVolumeConfirmationLabel(c.volRatio)],
     ["Bandas Bollinger", `${number((c.close-c.bbLower)/(c.bbUpper-c.bbLower)*100,0)}%`, weights.bands, c.parts.bands, c.parts.bands>0?"Mitad superior":c.parts.bands<0?"Mitad inferior":"Zona media"],
-    ["EMA 50 / EMA 200", c.ema50>c.ema200?"Alcista":"Bajista", weights.emaTrend, c.parts.emaTrend, c.ema50>c.ema200?"Estructura de tendencia +":"Estructura de tendencia ÃƒÂ¢Ã‹â€ Ã¢â‚¬â„¢"],
+    ["EMA 50 / EMA 200", c.ema50>c.ema200?"Alcista":"Bajista", weights.emaTrend, c.parts.emaTrend, c.ema50>c.ema200?"Estructura de tendencia +":"Estructura de tendencia \u2193"],
     ["Precio / EMA 50", c.close>c.ema50?"Por encima":"Por debajo", weights.ema50, c.parts.ema50, `${money(Math.abs(c.close-c.ema50))} de distancia`]
   ];
   $("metrics").innerHTML = data.map(([name,value,weight,part,note]) => `<article class="metric ${part>.15?"bull":part<-.15?"bear":""}"><div class="metric-top"><span class="metric-name">${name}</span><span class="metric-weight">PESO ${number(weight,1)}%</span></div><div class="metric-value">${value}</div><div class="metric-state">${note}</div></article>`).join("");
@@ -246,7 +247,7 @@ function renderSimulator() {
     ["BANCA ACTUAL", money(mark.equity,2), totalReturn],
     ["RETORNO TOTAL", `${totalReturn>=0?"+":""}${number(totalReturn)}%`, totalReturn],
     ["TRADES CERRADOS", sim.trades.length],
-    ["TASA DE ACIERTO", sim.trades.length ? `${number(closedWins/sim.trades.length*100,1)}%` : "ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â"],
+    ["TASA DE ACIERTO", formatWinRate(closedWins, sim.trades.length)],
     ["AJUSTES APRENDIDOS", sim.learningSteps],
     ["ESTADO", sim.riskControl?.halted ? "RISK HALT · RESET REQUIRED" : state.staleData ? "STALE · TRADING PAUSED" : sim.position ? `EN ${sim.position.side.toUpperCase()}` : sim.pendingReversal ? "REVERSAL PENDING" : "ESPERANDO"]
   ];
