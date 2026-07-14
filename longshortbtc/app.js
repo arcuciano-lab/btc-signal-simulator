@@ -1,5 +1,5 @@
 import { analyze } from "./strategy.js";
-import { calculateMacroImpact } from "./macro-impact.js";
+import { calculateMacroImpact, classifyMacroEventScore, scoreMacroEvent } from "./macro-impact.js";
 import { createSimulator, getConsensus, getMarkToMarket, isValidCandle, migrateSimulator, processSimulator as updateSimulator, TIMEFRAMES } from "./simulator.js";
 const SIM_KEY = "btc-signal-simulator-v3";
 const LEGACY_SIM_KEYS = ["btc-signal-simulator-v2", "btc-signal-simulator-v1"];
@@ -40,16 +40,39 @@ function renderMacroItems(items) {
   }
   const group = document.createElement("span"); group.className = "macro-ticker-group";
   items.forEach(item => {
-    const event = document.createElement("span"); event.className = "macro-event";
+    const scored = scoreMacroEvent(item);
+    const relevance = classifyMacroEventScore(scored.score);
+    const event = document.createElement("span");
+    event.className = `macro-event macro-event-${relevance.band}`;
+    event.setAttribute("dir", "rtl");
     const time = item.timestamp ? new Intl.DateTimeFormat("es-ES", { hour:"2-digit", minute:"2-digit" }).format(item.timestamp) : "HOY";
-    const heading = document.createElement("strong"); heading.textContent = `${time} · ${item.currency || "GLOBAL"} · ${item.title}`; event.append(heading);
+    const heading = document.createElement("strong"); heading.setAttribute("dir", "ltr");
+    const timeText = document.createElement("bdi"); timeText.textContent = time;
+    const currency = document.createElement("bdi"); currency.textContent = item.currency || "GLOBAL";
+    const title = document.createElement("bdi"); title.textContent = item.title;
+    heading.append(timeText, " · ", currency, " · ", title);
+    const score = document.createElement("span"); score.className = "macro-event-score"; score.setAttribute("dir", "ltr"); score.textContent = `${relevance.label} · SCORE ${scored.score}/100`;
+    event.append(heading, score);
     [["REAL", item.actual], ["PREV.", item.forecast], ["ANT.", item.previous]].map(([label, value]) => macroValue(label, value)).filter(Boolean).forEach(node => event.append(node));
     group.append(event);
   });
-  track.append(group, group.cloneNode(true));
+  const loopClone = group.cloneNode(true);
+  loopClone.setAttribute("aria-hidden", "true");
+  track.append(group, loopClone);
 }
-const macroImpactTimer = setInterval(() => updateMacroImpact(lastMacroItems), 60000);
-addEventListener("pagehide", () => clearInterval(macroImpactTimer), { once:true });
+let macroImpactTimer = null;
+function startMacroImpactTimer() {
+  if (macroImpactTimer !== null) return;
+  macroImpactTimer = setInterval(() => updateMacroImpact(lastMacroItems), 60000);
+}
+function stopMacroImpactTimer() {
+  if (macroImpactTimer === null) return;
+  clearInterval(macroImpactTimer);
+  macroImpactTimer = null;
+}
+startMacroImpactTimer();
+addEventListener("pagehide", stopMacroImpactTimer);
+addEventListener("pageshow", event => { if (event.persisted) { startMacroImpactTimer(); updateMacroImpact(lastMacroItems); } });
 async function loadMacroTicker() {
   try {
     const response = await fetch("/api/macro-calendar"); const payload = await response.json(); renderMacroItems(Array.isArray(payload.items) ? payload.items : []);

@@ -16,6 +16,12 @@ export function scoreMacroEvent(event, now = Date.now()) {
   if(actual&&forecast&&actual.unit===forecast.unit){const scale=Math.max(Math.abs(forecast.value),Math.abs(actual.value),actual.unit==="%"?0.1:1);surprise=Math.min(15,Math.round(Math.abs(actual.value-forecast.value)/scale*30));}
   return {score:Math.min(100,importance+proximity+surprise),importance,proximity,surprise};
 }
+export function classifyMacroEventScore(score) {
+  const bounded = Math.max(0, Math.min(100, Number.isFinite(score) ? score : 0));
+  if (bounded >= 65) return { band:"high", label:"ALTO" };
+  if (bounded >= 40) return { band:"medium", label:"MEDIO" };
+  return { band:"low", label:"BAJO" };
+}
 export function calculateMacroImpact(events, now = Date.now()) {
   const unique = new Map();
   for (const event of Array.isArray(events) ? events : []) {
