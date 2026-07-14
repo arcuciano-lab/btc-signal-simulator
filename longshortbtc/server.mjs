@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 4173);
-const ALLOWED_INTERVALS = new Set(["5m", "15m", "1h", "4h"]);
+const ALLOWED_INTERVALS = new Set(["1m", "5m", "15m", "1h", "4h"]);
 const ECONOMIC_CALENDAR_URL = "https://es.investing.com/economic-calendar/";
 const BLS_CALENDAR_URL = "https://www.bls.gov/schedule/news_release/bls.ics";
 const NEWS_SOURCES = [

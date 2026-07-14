@@ -74,10 +74,10 @@
               <div><p id="chartRangeLabel" class="eyebrow">PRECIO · ÚLTIMAS 120 VELAS</p><h2 id="chartTitle">BTC / USDT</h2></div>
               <div class="chart-head-actions">
                 <nav class="timeframes" aria-label="Temporalidad">
+                  <button type="button" data-tf="1m">1 min</button>
                   <button type="button" data-tf="5m">5 min</button>
                   <button type="button" data-tf="15m">15 min</button>
                   <button type="button" data-tf="1h" class="active">1 hora</button>
-                  <button type="button" data-tf="4h">4 horas</button>
                 </nav>
                 <div class="chart-legend"><span class="l-price">Velas</span><span class="l-ema50">EMA 50</span><span class="l-ema200">EMA 200</span><span class="l-trade">Trade + TP/SL</span></div>
               </div>
@@ -100,10 +100,16 @@
           <div id="metrics" class="metrics-grid"></div>
         </section>
 
+        <section class="institutional-report-card" aria-labelledby="institutionalReportTitle">
+          <div class="section-title"><div><p class="eyebrow">INSTITUTIONAL INTELLIGENCE · 1 MIN</p><h2 id="institutionalReportTitle">Adaptive Strategy Intelligence Report</h2></div><span id="institutionalStatus" class="institutional-status">BOUNDED RECALIBRATION</span></div>
+          <pre id="institutionalReport" class="institutional-report" aria-live="polite">Waiting for closed 1-minute data…</pre>
+          <p class="paper-state-advisory">Local paper state is advisory and user-resettable. Browser storage is not tamper-proof.</p>
+        </section>
+
         <section class="backtest-section simulator-section">
           <div class="section-title simulator-title">
             <div><p class="eyebrow">PAPER TRADING · APRENDIZAJE LOCAL</p><h2>Simulador de trades</h2></div>
-            <div class="sim-actions"><span id="simUpdated">—</span><button id="resetSimulator" type="button">Reiniciar</button></div>
+            <div class="sim-actions"><span id="simUpdated">—</span><button id="resetSimulator" type="button">Reiniciar banca, memoria y bloqueo</button></div>
           </div>
           <div id="simulatorStats" class="stats-grid simulator-stats"></div>
           <div id="openPosition" class="open-position"></div>

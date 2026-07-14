@@ -1,8 +1,9 @@
 import { analyze } from "./strategy.js";
 import { calculateMacroImpact, classifyMacroEventScore, scoreMacroEvent } from "./macro-impact.js";
 import { createSimulator, getConsensus, getMarkToMarket, isValidCandle, migrateSimulator, processSimulator as updateSimulator, TIMEFRAMES } from "./simulator.js";
-const SIM_KEY = "btc-signal-simulator-v3";
-const LEGACY_SIM_KEYS = ["btc-signal-simulator-v2", "btc-signal-simulator-v1"];
+import { buildInstitutionalReport, buildPatternEvidence, validatePattern } from "./institutional-intelligence.js";
+const SIM_KEY = "btc-signal-simulator-v4";
+const LEGACY_SIM_KEYS = ["btc-signal-simulator-v3", "btc-signal-simulator-v2", "btc-signal-simulator-v1"];
 const CHART_KEY = "btc-chart-indicators-v2";
 const VISIBLE_CANDLE_COUNT = 120;
 const MARKET_HISTORY_LIMIT = 320;
@@ -10,6 +11,7 @@ const $ = id => document.getElementById(id);
 const money = (v, digits = 0) => new Intl.NumberFormat("es-ES", { style:"currency", currency:"USD", minimumFractionDigits:digits, maximumFractionDigits:digits }).format(v);
 const number = (v, d = 2) => new Intl.NumberFormat("es-ES", { minimumFractionDigits:d, maximumFractionDigits:d }).format(v);
 const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+const escapeHtml = value => String(value).replace(/[&<>"']/g, char => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[char]);
 
 function macroValue(label, value) {
   if (!value) return null;
@@ -21,6 +23,7 @@ function macroValue(label, value) {
 let lastMacroItems = [];
 function updateMacroImpact(items) {
   const impact = calculateMacroImpact(items);
+  state.macroSnapshot = { ...state.macroSnapshot, score: impact.score, calculatedAt: Date.now() };
   $("macroImpactScore").textContent = impact.score;
   $("macroImpactBand").textContent = impact.label;
   $("macroImpact").className = `macro-impact ${impact.band}`;
@@ -28,7 +31,7 @@ function updateMacroImpact(items) {
   $("macroImpactFill").style.width = `${impact.score}%`;
   const meter = $("macroImpact").querySelector('[role="meter"]');
   meter.setAttribute("aria-valuenow", String(impact.score));
-  meter.setAttribute("aria-valuetext", `${impact.label}: ${impact.score} de 100. Intensidad, no dirección.`);
+  meter.setAttribute("aria-valuetext", `${impact.label}: ${impact.score} de 100. Intensidad, no direcciÃƒÆ’Ã‚Â³n.`);
 }
 function renderMacroItems(items) {
   const track = $("macroTickerTrack");
@@ -75,12 +78,16 @@ addEventListener("pagehide", stopMacroImpactTimer);
 addEventListener("pageshow", event => { if (event.persisted) { startMacroImpactTimer(); updateMacroImpact(lastMacroItems); } });
 async function loadMacroTicker() {
   try {
-    const response = await fetch("/api/macro-calendar"); const payload = await response.json(); renderMacroItems(Array.isArray(payload.items) ? payload.items : []);
+    const response = await fetch("/api/macro-calendar"); const payload = await response.json();
+    const observedAt = Number.isFinite(payload.observedAt) ? payload.observedAt : Number.isFinite(payload.updatedAt) ? payload.updatedAt : Date.now();
+    state.macroSnapshot = { score: null, source: payload.source || "unknown", stale: !response.ok || payload.stale === true,
+      observedAt, asOf: Number.isFinite(payload.asOf) ? payload.asOf : observedAt, availableFrom: observedAt, updatedAt: observedAt, calculatedAt: null };
+    renderMacroItems(response.ok && Array.isArray(payload.items) ? payload.items : []);
     const source = $("macroTickerSource");
     if (source && payload.source === "U.S. Bureau of Labor Statistics") { source.textContent = "BLS.GOV"; source.href = "https://www.bls.gov/schedule/news_release/"; }
     else if (source) { source.textContent = "INVESTING.COM"; source.href = "https://es.investing.com/economic-calendar/"; }
   }
-  catch { renderMacroItems([]); }
+  catch { state.macroSnapshot = { score: null, source: null, stale: true, observedAt: null, asOf: null, updatedAt: null, calculatedAt: Date.now() }; renderMacroItems([]); }
 }
 
 const macroTicker = document.querySelector(".macro-ticker");
@@ -97,6 +104,7 @@ const state = {
   currentByTf: {},
   rowsByTf: {},
   loading: false,
+  macroSnapshot: { score: null, source: null, stale: true, observedAt: null, asOf: null, availableFrom: null, updatedAt: null, calculatedAt: null },
   chartIndicators: loadChartPreferences(),
   simulator: loadSimulator()
 };
@@ -130,7 +138,8 @@ function saveSimulator() {
 async function getCandles(tf, force = false) {
   const cached = state.cache[tf];
   if (!force && cached && Date.now() - cached.fetchedAt < 45_000) return cached.candles;
-  const response = await fetch(`/api/klines?interval=${tf}&limit=${MARKET_HISTORY_LIMIT}`);
+  const limit = tf === "1m" ? 1000 : MARKET_HISTORY_LIMIT;
+  const response = await fetch(`/api/klines?interval=${tf}&limit=${limit}`);
   const json = await response.json();
   if (!response.ok) throw new Error(json.error || "No se pudo consultar el mercado");
   const mapped = json.map(k => ({ time:k[0], open:+k[1], high:+k[2], low:+k[3], close:+k[4], volume:+k[5], closeTime:k[6] }));
@@ -162,12 +171,12 @@ async function load(tf, background = false) {
     if (!state.staleData) processSimulator();
     const activeTf = state.tf;
     const rows = state.rowsByTf[activeTf], current = rows.at(-1);
-    const prior24 = rows[Math.max(0, rows.length - ({"5m":288,"15m":96,"1h":24,"4h":6}[activeTf]))];
+    const prior24 = rows[Math.max(0, rows.length - ({"1m":1440,"5m":288,"15m":96,"1h":24}[activeTf]))];
     $("dashboard").hidden = false;
     $("signalBanner").hidden = false;
     render(rows, current, prior24);
   } catch (error) {
-    $("error").textContent = `No se pudieron cargar los datos: ${error.message}. Comprueba tu conexión y vuelve a intentarlo.`;
+    $("error").textContent = `No se pudieron cargar los datos: ${error.message}. Comprueba tu conexiÃƒÆ’Ã‚Â³n y vuelve a intentarlo.`;
     $("error").hidden = false;
   } finally {
     $("loading").hidden = true;
@@ -180,19 +189,19 @@ function consensus() {
 }
 
 function processSimulator() {
-  updateSimulator(state.simulator, state.currentByTf, state.rowsByTf);
+  updateSimulator(state.simulator, state.currentByTf, state.rowsByTf, { macroSnapshot: state.macroSnapshot });
   saveSimulator();
 }
 
 function markToMarket() {
-  return getMarkToMarket(state.simulator, state.currentByTf["5m"]);
+  return getMarkToMarket(state.simulator, state.currentByTf["1m"]);
 }
 
 function render(rows, current, prior24) {
   state.lastRows = rows;
   $("price").textContent = money(current.close);
   const change = (current.close/prior24.close-1)*100;
-  $("priceChange").textContent = `${change >= 0 ? "+" : ""}${number(change)}% · últimas 24 h`;
+  $("priceChange").textContent = `${change >= 0 ? "+" : ""}${number(change)}% · ÃƒÆ’Ã‚Âºltimas 24 h`;
   $("priceChange").style.color = change >= 0 ? "var(--green)" : "var(--red)";
   $("longScore").textContent = current.long;
   $("shortScore").textContent = current.short;
@@ -205,7 +214,7 @@ function render(rows, current, prior24) {
   $("signalNote").textContent = zone === "extreme" ? `This timeframe is in the extreme ${dominant.toLowerCase()} zone. The simulator enters only when at least three timeframes agree.` : "No extreme zone yet. The simulator remains patient and out of the market.";
   $("chartTitle").textContent = `BTC / USDT · ${labelTf(state.tf)}`;
   renderMetrics(current);
-  $("chartRangeLabel").textContent=`PRECIO · ÚLTIMAS ${VISIBLE_CANDLE_COUNT} VELAS`;
+  $("chartRangeLabel").textContent=`PRECIO · ÃƒÆ’Ã…Â¡LTIMAS ${VISIBLE_CANDLE_COUNT} VELAS`;
   drawCharts(rows.slice(-VISIBLE_CANDLE_COUNT));
   renderSimulator();
   $("updated").textContent = `Cierre analizado: ${new Date(current.closeTime).toLocaleString("es-ES", {dateStyle:"short",timeStyle:"short"})}`;
@@ -216,9 +225,9 @@ function renderMetrics(c) {
   const data = [
     ["RSI · 14", number(c.rsi,1), weights.rsi, c.parts.rsi, c.rsi>55?"Impulso comprador":c.rsi<45?"Impulso vendedor":"En equilibrio"],
     ["MACD · 12/26/9", `${c.hist>=0?"+":""}${number(c.hist,2)}`, weights.macd, c.parts.macd, c.hist>=0?"Momentum positivo":"Momentum negativo"],
-    ["Volumen / media", `${number(c.volRatio,2)}×`, weights.volume, c.parts.volume, c.volRatio>=1.1?"Volumen confirma":"Confirmación débil"],
+    ["Volumen / media", `${number(c.volRatio,2)}ÃƒÆ’Ã¢â‚¬â€`, weights.volume, c.parts.volume, c.volRatio>=1.1?"Volumen confirma":"ConfirmaciÃƒÆ’Ã‚Â³n dÃƒÆ’Ã‚Â©bil"],
     ["Bandas Bollinger", `${number((c.close-c.bbLower)/(c.bbUpper-c.bbLower)*100,0)}%`, weights.bands, c.parts.bands, c.parts.bands>0?"Mitad superior":c.parts.bands<0?"Mitad inferior":"Zona media"],
-    ["EMA 50 / EMA 200", c.ema50>c.ema200?"Alcista":"Bajista", weights.emaTrend, c.parts.emaTrend, c.ema50>c.ema200?"Estructura de tendencia +":"Estructura de tendencia −"],
+    ["EMA 50 / EMA 200", c.ema50>c.ema200?"Alcista":"Bajista", weights.emaTrend, c.parts.emaTrend, c.ema50>c.ema200?"Estructura de tendencia +":"Estructura de tendencia ÃƒÂ¢Ã‹â€ Ã¢â‚¬â„¢"],
     ["Precio / EMA 50", c.close>c.ema50?"Por encima":"Por debajo", weights.ema50, c.parts.ema50, `${money(Math.abs(c.close-c.ema50))} de distancia`]
   ];
   $("metrics").innerHTML = data.map(([name,value,weight,part,note]) => `<article class="metric ${part>.15?"bull":part<-.15?"bear":""}"><div class="metric-top"><span class="metric-name">${name}</span><span class="metric-weight">PESO ${number(weight,1)}%</span></div><div class="metric-value">${value}</div><div class="metric-state">${note}</div></article>`).join("");
@@ -232,28 +241,76 @@ function renderSimulator() {
     ["BANCA ACTUAL", money(mark.equity,2), totalReturn],
     ["RETORNO TOTAL", `${totalReturn>=0?"+":""}${number(totalReturn)}%`, totalReturn],
     ["TRADES CERRADOS", sim.trades.length],
-    ["TASA DE ACIERTO", sim.trades.length ? `${number(closedWins/sim.trades.length*100,1)}%` : "—"],
+    ["TASA DE ACIERTO", sim.trades.length ? `${number(closedWins/sim.trades.length*100,1)}%` : "ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â"],
     ["AJUSTES APRENDIDOS", sim.learningSteps],
-    ["ESTADO", state.staleData ? "STALE · TRADING PAUSED" : sim.position ? `EN ${sim.position.side.toUpperCase()}` : sim.pendingReversal ? "REVERSAL PENDING" : "ESPERANDO"]
+    ["ESTADO", sim.riskControl?.halted ? "RISK HALT · RESET REQUIRED" : state.staleData ? "STALE · TRADING PAUSED" : sim.position ? `EN ${sim.position.side.toUpperCase()}` : sim.pendingReversal ? "REVERSAL PENDING" : "ESPERANDO"]
   ];
   $("simulatorStats").innerHTML = stats.map(([label,value,tone]) => `<div class="stat"><span>${label}</span><strong class="${tone>0?"positive":tone<0?"negative":""}">${value}</strong></div>`).join("");
 
   if (sim.position) {
     const p = sim.position;
     $("openPosition").className = `open-position ${p.side}`;
-    $("openPosition").innerHTML = `<div><span>${p.dataGap||state.staleData?"POSITION PAUSED":"OPEN POSITION"}</span><strong>${p.side.toUpperCase()} · ${money(p.entry)} · ${p.leverage}x</strong><small>${state.staleData?"Stale aligned snapshot; no trading":leverageExplanation(p)}</small></div><div><span>REMAINING SIZE</span><strong>${number(p.remainingFraction*100,0)}%${p.partialTaken?" · PARTIAL TAKEN":""}</strong><small>2% budget covers the estimated normal stop; gaps or liquidation can lose more.</small></div><div><span>REALIZED P&amp;L</span><strong class="${p.realizedPnl>=0?"positive":"negative"}">${p.realizedPnl>=0?"+":""}${money(p.realizedPnl,2)}</strong></div><div><span>UNREALIZED P&amp;L</span><strong class="${mark.pnl>=0?"positive":"negative"}">${mark.pnl>=0?"+":""}${money(mark.pnl,2)} · ${number(mark.pct)}% estimated ROI</strong><small>${number(mark.assetReturn)}% asset return · estimated fees and slippage on ${p.leverage}x notional</small></div>`;
+    const plans=(p.structuralPartials||[]).map(level=>`${level.executed?"FILLED":"PLANNED"} ${money(level.level)} (${level.reason})`).join(" · ") || "No valid structural level ahead";
+    $("openPosition").innerHTML = `<div><span>${p.dataGap||state.staleData?"POSITION PAUSED":"OPEN POSITION"}</span><strong>${p.side.toUpperCase()} · ${money(p.entry)} · ${p.leverage}x</strong><small>${escapeHtml(state.staleData?"Stale aligned snapshot; no trading":leverageExplanation(p))}</small></div><div><span>REMAINING SIZE</span><strong>${number(p.remainingFraction*100,0)}%${p.partialTaken?" · PARTIAL TAKEN":""}</strong><small>10x is the minimum policy, not low risk. The 2% budget covers the estimated normal stop; gaps or liquidation can lose more.</small><small>${plans}</small></div><div><span>REALIZED P&amp;L</span><strong class="${p.realizedPnl>=0?"positive":"negative"}">${p.realizedPnl>=0?"+":""}${money(p.realizedPnl,2)}</strong></div><div><span>UNREALIZED P&amp;L</span><strong class="${mark.pnl>=0?"positive":"negative"}">${mark.pnl>=0?"+":""}${money(mark.pnl,2)} · ${number(mark.pct)}% estimated ROI</strong><small>${number(mark.assetReturn)}% asset return · estimated fees and slippage on ${p.leverage}x notional</small></div>`;
   } else {
     $("openPosition").className = "open-position waiting";
     $("openPosition").innerHTML = sim.pendingReversal
-      ? `<div><span>REVERSAL PENDING</span><strong>${sim.pendingReversal.side.toUpperCase()} · ${sim.pendingReversal.score} score · ${sim.pendingReversal.agreement}/4 agreement</strong></div><div><span>EARLIEST ENTRY</span><strong>Next confirmed closed 5m candle</strong></div>`
+      ? `<div><span>REVERSAL PENDING</span><strong>${sim.pendingReversal.side.toUpperCase()} · ${sim.pendingReversal.score} score · ${sim.pendingReversal.agreement}/4 agreement</strong></div><div><span>EARLIEST ENTRY</span><strong>Next confirmed closed 1m candle</strong></div>`
       : `<div><span>NO POSITION</span><strong>Waiting for an extreme zone with 3/4 confirmation</strong></div>`;
   }
 
   $("consensusScore").textContent = `${signal.long} LONG / ${signal.short} SHORT · ${signal.agreement}/4 confirman`;
   $("timeframeSignals").innerHTML = TIMEFRAMES.map(tf => { const c=state.currentByTf[tf]; const lead=c.long>=c.short?"long":"short"; return `<div class="tf-signal ${lead}"><span>${labelTf(tf)}</span><strong>${c.long} L</strong><strong>${c.short} S</strong></div>`; }).join("");
   $("tradeCount").textContent = `${sim.trades.length} trade${sim.trades.length===1?"":"s"}`;
-  $("tradesBody").innerHTML = sim.trades.length ? sim.trades.map(t => `<tr><td>${formatDate(t.entryTime)}</td><td><span class="trade-side ${t.side}">${t.side.toUpperCase()} · ${t.leverage||1}x</span></td><td>${t.longScore} / ${t.shortScore}</td><td>${money(t.entry)} → ${money(t.exit)}${t.partials?.length?`<small>50% partial at ${money(t.partials[0].price)}</small>`:""}</td><td>${formatDate(t.exitTime)}<small>${t.reason}</small></td><td class="${t.pnl>=0?"positive":"negative"}">${t.pnl>=0?"+":""}${money(t.pnl,2)}<small>Realized · ${t.net>=0?"+":""}${number(t.net*100)}% ROI · ${number((t.weightedAssetReturn??t.assetReturn??0)*100)}% asset</small></td></tr>`).join("") : `<tr><td colspan="6" class="empty-trades">No trades yet. The simulator is waiting for a confirmed extreme signal.</td></tr>`;
+  renderTradeHistory(sim.trades);
+  const report = $("institutionalReport");
+  if (report) {
+    const market = state.currentByTf["1m"];
+    const patterns = buildPatternEvidence(state.rowsByTf["1m"]).map(candidate => validatePattern(candidate, sim.trades));
+    report.textContent = buildInstitutionalReport({ market, simulator: sim, macroSnapshot: state.macroSnapshot, patterns });
+  }
+  const status = $("institutionalStatus");
+  if (status) status.textContent = sim.riskControl?.halted ? "RISK HALT" : `BOUNDED RECALIBRATION · ${Math.min(sim.trades.length, 10)}/10`;
   $("simUpdated").textContent = `Actualiza cada 60 s · ${new Date().toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"})}`;
+}
+
+function appendCell(row, text, className = "") {
+  const cell = document.createElement("td");
+  if (className) cell.className = className;
+  cell.textContent = text;
+  row.append(cell);
+  return cell;
+}
+
+function renderTradeHistory(trades) {
+  const body = $("tradesBody");
+  body.replaceChildren();
+  if (!trades.length) {
+    const row = document.createElement("tr");
+    const cell = appendCell(row, "No trades yet. The simulator is waiting for a confirmed extreme signal.", "empty-trades");
+    cell.colSpan = 6;
+    body.append(row);
+    return;
+  }
+  for (const trade of trades) {
+    const row = document.createElement("tr");
+    appendCell(row, formatDate(trade.entryTime));
+    appendCell(row, `${trade.side.toUpperCase()} ? ${trade.leverage || 1}x`);
+    appendCell(row, `${trade.longScore} / ${trade.shortScore}`);
+    const prices = appendCell(row, `${money(trade.entry)} ? ${money(trade.exit)}`);
+    for (const part of trade.partials || []) {
+      const detail = document.createElement("small");
+      detail.textContent = `${number(part.fraction * 100, 0)}% at ${money(part.price)} - ${part.reason}`;
+      prices.append(detail);
+    }
+    const exit = appendCell(row, formatDate(trade.exitTime));
+    const reason = document.createElement("small"); reason.textContent = trade.reason; exit.append(reason);
+    const pnl = appendCell(row, `${trade.pnl >= 0 ? "+" : ""}${money(trade.pnl, 2)}`, trade.pnl >= 0 ? "positive" : "negative");
+    const summary = document.createElement("small");
+    summary.textContent = `Realized ? ${trade.net >= 0 ? "+" : ""}${number(trade.net * 100)}% ROI ? ${number((trade.weightedAssetReturn ?? trade.assetReturn ?? 0) * 100)}% asset`;
+    pnl.append(summary);
+    body.append(row);
+  }
 }
 
 function leverageExplanation(position) {
@@ -298,7 +355,7 @@ function drawPriceChart(rows) {
   const sets=[{v:rows.map(r=>r.ema50),c:"#ffe600",w:1.4},{v:rows.map(r=>r.ema200),c:"#ff3567",w:1.4}];
   const bandValues=state.chartIndicators.bollinger?rows.flatMap(r=>[r.bbUpper,r.bbLower]):[];
   const trade=state.simulator.position,tradeLevels=trade?[trade.entry]:[];
-  const all=[...rows.flatMap(r=>[r.high,r.low]),...sets.flatMap(s=>s.v),...bandValues,...tradeLevels].filter(Number.isFinite), rawMin=Math.min(...all), rawMax=Math.max(...all), pad=(rawMax-rawMin)*.08||1, min=rawMin-pad,max=rawMax+pad;
+  const all=[...rows.flatMap(r=>[r.high,r.low]),...sets.flatMap(s=>s.v),...bandValues,...tradeLevels,...(trade?.structuralPartials||[]).map(p=>p.level)].filter(Number.isFinite), rawMin=Math.min(...all), rawMax=Math.max(...all), pad=(rawMax-rawMin)*.08||1, min=rawMin-pad,max=rawMax+pad;
   ctx.strokeStyle="#182127";ctx.lineWidth=1;
   for(let i=0;i<=4;i++){const gy=chartH*i/4;ctx.beginPath();ctx.moveTo(0,gy);ctx.lineTo(plotW,gy);ctx.stroke()}
   for(let i=1;i<7;i++){const gx=plotW*i/7;ctx.beginPath();ctx.moveTo(gx,0);ctx.lineTo(gx,chartH);ctx.stroke()}
@@ -326,9 +383,10 @@ function drawOpenTradeLine(ctx,rows,min,max,W,H,slot){
   const entryIndex=rows.findIndex(r=>r.closeTime>=trade.entryTime),startX=entryIndex>=0?(entryIndex+.5)*slot:0;
   ctx.save();
   ctx.fillStyle="#00f5a00d";ctx.fillRect(startX,Math.min(lineY,targetY),W-startX,Math.abs(targetY-lineY));ctx.fillStyle="#ff35670d";ctx.fillRect(startX,Math.min(lineY,stopY),W-startX,Math.abs(stopY-lineY));
-  drawTradeLevel(ctx,startX,W,targetY,"#00f5a0",`TP +5% asset · est. +${number(4.7*trade.leverage,1)}% ROI${rawTargetY<0?" ↑":rawTargetY>H?" ↓":""}`,[3,5],1);
-  drawTradeLevel(ctx,startX,W,stopY,"#ff3567",`SL −2.5% asset · est. −${number(2.8*trade.leverage,1)}% ROI${rawStopY<0?" ↑":rawStopY>H?" ↓":""}`,[3,5],1);
+  drawTradeLevel(ctx,startX,W,targetY,"#00f5a0",`TP +5% asset · est. +${number(4.7*trade.leverage,1)}% ROI${rawTargetY<0?" ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬Ëœ":rawTargetY>H?" ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬Å“":""}`,[3,5],1);
+  drawTradeLevel(ctx,startX,W,stopY,"#ff3567",`SL ÃƒÂ¢Ã‹â€ Ã¢â‚¬â„¢2.5% asset · est. ÃƒÂ¢Ã‹â€ Ã¢â‚¬â„¢${number(2.8*trade.leverage,1)}% ROI${rawStopY<0?" ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬Ëœ":rawStopY>H?" ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬Å“":""}`,[3,5],1);
   drawTradeLevel(ctx,startX,W,lineY,color,`SIM ${trade.side.toUpperCase()} · ENTRADA ${money(trade.entry)}`,[8,5],1.6,true);
+  (trade.structuralPartials||[]).forEach(plan=>{const py=clamp(H-(plan.level-min)/(max-min)*H,3,H-3);drawTradeLevel(ctx,startX,W,py,plan.executed?"#71808b":"#ffcc00",`${plan.executed?"FILLED":"PARTIAL 25%"} · ${plan.reason} · ${money(plan.level)}`,[2,4],1)});
   ctx.restore();
 }
 
@@ -356,7 +414,7 @@ function drawMacdChart(rows){
   plotLine(ctx,macd,min,max,W,H,"#00d9ff",1.3,3);plotLine(ctx,signal,min,max,W,H,"#ff4fd8",1.2,3);
 }
 
-function labelTf(tf){return ({"5m":"5 min","15m":"15 min","1h":"1 hora","4h":"4 horas"})[tf]}
+function labelTf(tf){return ({"1m":"1 min","5m":"5 min","15m":"15 min","1h":"1 hora"})[tf]}
 
 document.querySelectorAll("[data-tf]").forEach(btn => btn.addEventListener("click", () => {
   document.querySelector("[data-tf].active").classList.remove("active");
@@ -366,7 +424,7 @@ document.querySelectorAll("[data-tf]").forEach(btn => btn.addEventListener("clic
 }));
 
 $("resetSimulator").addEventListener("click", () => {
-  if (!confirm("¿Reiniciar la banca a 1.000 USDT y borrar todos los trades y aprendizajes?")) return;
+  if (!confirm("Ãƒâ€šÃ‚Â¿Reiniciar la banca a 1.000 USDT y borrar todos los trades y aprendizajes?")) return;
   state.simulator = freshSimulator();
   saveSimulator();
   state.cache = {};
@@ -379,4 +437,5 @@ setInterval(() => load(state.tf, true), 60_000);
 setInterval(loadMacroTicker, 15 * 60_000);
 loadMacroTicker();
 load(state.tf);
+
 
