@@ -2,7 +2,7 @@ import { analyze } from "./strategy.js";
 import { calculateMacroImpact, classifyMacroEventScore, scoreMacroEvent } from "./macro-impact.js";
 import { createSimulator, getConsensus, getMarkToMarket, isValidCandle, migrateSimulator, processSimulator as updateSimulator, TIMEFRAMES } from "./simulator.js";
 import { buildInstitutionalReport, buildPatternEvidence, validatePattern } from "./institutional-intelligence.js";
-import { calculateCandlePriceDomain, selectVisibleCandles } from "./price-chart.js";
+import { calculateCandleBodyGeometry, calculateCandlePriceDomain, projectPriceLevel, selectVisibleCandles } from "./price-chart.js";
 const SIM_KEY = "btc-signal-simulator-v6";
 // Legacy leverageReason payloads are intentionally ignored by the v6 reset.
 const LEGACY_SIM_KEYS = ["btc-signal-simulator-v5", "btc-signal-simulator-v4", "btc-signal-simulator-v3", "btc-signal-simulator-v2", "btc-signal-simulator-v1"];
@@ -353,24 +353,24 @@ function drawPriceChart(rows) {
   rows=selectVisibleCandles(rows,VISIBLE_CANDLE_COUNT);if(!rows.length)return;
   const surface=setupCanvas("priceChart"); if(!surface)return; const {ctx,W,H}=surface;
   const axisW=70, plotW=Math.max(100,W-axisW), chartH=H-22;
-  const sets=[{v:rows.map(r=>r.ema50),c:"#ffe600",w:1.4},{v:rows.map(r=>r.ema200),c:"#ff3567",w:1.4}];
+  const sets=[{v:rows.map(r=>r.ema50),c:"#ffe600a6",w:1},{v:rows.map(r=>r.ema200),c:"#ff3567a6",w:1}];
   const {min,max}=calculateCandlePriceDomain(rows);
   ctx.strokeStyle="#182127";ctx.lineWidth=1;
   for(let i=0;i<=4;i++){const gy=chartH*i/4;ctx.beginPath();ctx.moveTo(0,gy);ctx.lineTo(plotW,gy);ctx.stroke()}
   for(let i=1;i<7;i++){const gx=plotW*i/7;ctx.beginPath();ctx.moveTo(gx,0);ctx.lineTo(gx,chartH);ctx.stroke()}
   ctx.font="8px DM Mono, monospace";ctx.textAlign="right";ctx.fillStyle="#71808b";for(let i=0;i<=4;i++){const value=max-(max-min)*i/4;ctx.fillText(money(value),W-5,clamp(chartH*i/4+3,9,chartH-3))}ctx.textAlign="left";
   if(state.chartIndicators.bollinger){
-    const upper=rows.map(r=>r.bbUpper),lower=rows.map(r=>r.bbLower),point=(v,i)=>[i/(rows.length-1)*plotW,chartH-(v-min)/(max-min)*chartH];
+    const upper=rows.map(r=>r.bbUpper),lower=rows.map(r=>r.bbLower),denominator=Math.max(1,rows.length-1),point=(v,i)=>[i/denominator*plotW,chartH-(v-min)/(max-min)*chartH];
     ctx.beginPath();upper.forEach((v,i)=>ctx[i?"lineTo":"moveTo"](...point(v,i)));[...lower].reverse().forEach((v,j)=>ctx.lineTo(...point(v,rows.length-1-j)));ctx.closePath();ctx.fillStyle="#8b5cf614";ctx.fill();
     plotLine(ctx,upper,min,max,plotW,chartH,"#278bd8",1,2);plotLine(ctx,lower,min,max,plotW,chartH,"#278bd8",1,2);
   }
+  sets.forEach(s=>plotLine(ctx,s.v,min,max,plotW,chartH,s.c,s.w,0));
   const slot=plotW/rows.length,bodyW=clamp(slot*.68,2.5,13),y=v=>chartH-(v-min)/(max-min)*chartH;
   rows.forEach((r,i)=>{
     const x=(i+.5)*slot,color=r.close>=r.open?"#00f5a0":"#ff3567",openY=y(r.open),closeY=y(r.close),highY=y(r.high),lowY=y(r.low);
-    ctx.strokeStyle=color;ctx.lineWidth=1;ctx.shadowColor=color;ctx.shadowBlur=6;ctx.beginPath();ctx.moveTo(x,highY);ctx.lineTo(x,lowY);ctx.stroke();
-    const top=Math.min(openY,closeY),height=Math.max(1,Math.abs(closeY-openY));ctx.fillStyle=color;ctx.shadowBlur=9;ctx.fillRect(x-bodyW/2,top,bodyW,height);ctx.shadowBlur=0;
+    ctx.strokeStyle=color;ctx.lineWidth=1.25;ctx.shadowBlur=0;ctx.beginPath();ctx.moveTo(x,highY);ctx.lineTo(x,lowY);ctx.stroke();
+    const body=calculateCandleBodyGeometry(openY,closeY,2.25);if(!body)return;ctx.fillStyle=color;ctx.fillRect(x-bodyW/2,body.top,bodyW,body.height);ctx.strokeStyle="#030506cc";ctx.lineWidth=.6;ctx.strokeRect(x-bodyW/2,body.top,bodyW,body.height);
   });
-  sets.forEach(s=>plotLine(ctx,s.v,min,max,plotW,chartH,s.c,s.w,s.w>1.5?5:2));
   const last=rows.at(-1),lastY=y(last.close);ctx.setLineDash([2,3]);ctx.strokeStyle=last.close>=last.open?"#00f5a088":"#ff356788";ctx.beginPath();ctx.moveTo(0,lastY);ctx.lineTo(plotW,lastY);ctx.stroke();ctx.setLineDash([]);const priceLabel=number(last.close,1),labelW=64;ctx.fillStyle=last.close>=last.open?"#00b979":"#d82955";ctx.fillRect(plotW+3,clamp(lastY-9,0,chartH-18),labelW,18);ctx.fillStyle="#fff";ctx.font="500 8px DM Mono, monospace";ctx.fillText(priceLabel,plotW+7,clamp(lastY+3,12,chartH-5));
   const timeStep=Math.max(1,Math.floor(rows.length/6));ctx.fillStyle="#65727c";ctx.font="8px DM Mono, monospace";rows.forEach((r,i)=>{if(i%timeStep!==0&&i!==rows.length-1)return;const x=(i+.5)*slot;ctx.fillText(new Date(r.closeTime).toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}),clamp(x-16,0,plotW-34),H-5)});
   drawOpenTradeLine(ctx,rows,min,max,plotW,chartH,slot);
@@ -378,16 +378,17 @@ function drawPriceChart(rows) {
 
 function drawOpenTradeLine(ctx,rows,min,max,W,H,slot){
   const trade=state.simulator.position;if(!trade)return;
-  const projectLevel=value=>clamp(H-(value-min)/(max-min)*H,3,H-3);
+  const projectLevel=value=>projectPriceLevel(value,min,max,H);
   const color=trade.side==="long"?"#00f5a0":"#ff3567",lineY=projectLevel(trade.weightedAverage),riskY=projectLevel(trade.riskBoundary),liquidationY=projectLevel(trade.liquidationBoundary);
+  if([lineY,riskY,liquidationY].some(value=>value===null))return;
   const entryIndex=rows.findIndex(r=>r.closeTime>=trade.entryTime),startX=entryIndex>=0?(entryIndex+.5)*slot:0;
   ctx.save();
   ctx.fillStyle="#ff35670d";ctx.fillRect(startX,Math.min(lineY,riskY),W-startX,Math.abs(riskY-lineY));
   drawTradeLevel(ctx,startX,W,riskY,"#ff3567",`HARD BASKET RISK ? ${money(trade.riskBoundary)} ? NO ORDINARY SL`,[3,5],1);
   drawTradeLevel(ctx,startX,W,liquidationY,"#a855f7",`MODELED CROSS-MARGIN LIQUIDATION ? ${money(trade.liquidationBoundary)}`,[2,6],1);
   drawTradeLevel(ctx,startX,W,lineY,color,`SIM ${trade.side.toUpperCase()} ? WEIGHTED AVG ${money(trade.weightedAverage)} ? FIXED 10x`,[8,5],1.6,true);
-  trade.legs.forEach(leg=>{const y=clamp(H-(leg.fillPrice-min)/(max-min)*H,3,H-3);drawTradeLevel(ctx,startX,W,y,"#00d9ff",`LEG ${leg.index} ? ${number(leg.marginFraction*100,0)}% ? ${money(leg.fillPrice)}`,[2,5],1)});
-  (trade.structuralPartials||[]).forEach(plan=>{const py=clamp(H-(plan.level-min)/(max-min)*H,3,H-3);drawTradeLevel(ctx,startX,W,py,plan.executed?"#71808b":"#ffcc00",`${plan.executed?"FILLED":"PARTIAL 25%"} ? ${plan.reason} ? ${money(plan.level)}`,[2,4],1)});
+  trade.legs.forEach(leg=>{const y=projectLevel(leg.fillPrice);if(y===null)return;drawTradeLevel(ctx,startX,W,y,"#00d9ff",`LEG ${leg.index} ? ${number(leg.marginFraction*100,0)}% ? ${money(leg.fillPrice)}`,[2,5],1)});
+  (trade.structuralPartials||[]).forEach(plan=>{const py=projectLevel(plan.level);if(py===null)return;drawTradeLevel(ctx,startX,W,py,plan.executed?"#71808b":"#ffcc00",`${plan.executed?"FILLED":"PARTIAL 25%"} ? ${plan.reason} ? ${money(plan.level)}`,[2,4],1)});
   ctx.restore();
 }
 

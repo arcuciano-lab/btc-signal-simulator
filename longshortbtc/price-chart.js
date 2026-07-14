@@ -5,7 +5,7 @@ export function selectVisibleCandles(rows, count = DEFAULT_VISIBLE_CANDLE_COUNT)
   return rows.slice(-Math.floor(count));
 }
 
-export function calculateCandlePriceDomain(rows, paddingRatio = 0.08) {
+export function calculateCandlePriceDomain(rows, paddingRatio = 0.04) {
   const prices = (Array.isArray(rows) ? rows : [])
     .flatMap(row => [row?.high, row?.low])
     .filter(Number.isFinite);
@@ -17,4 +17,17 @@ export function calculateCandlePriceDomain(rows, paddingRatio = 0.08) {
   const reference = Math.max(Math.abs(rawMin), Math.abs(rawMax), 1);
   const padding = Math.max((rawMax - rawMin) * paddingRatio, reference * 0.0005);
   return { min: rawMin - padding, max: rawMax + padding };
+}
+
+export function calculateCandleBodyGeometry(openY, closeY, minimumHeight = 2) {
+  if (![openY, closeY, minimumHeight].every(Number.isFinite)) return null;
+  const naturalHeight = Math.abs(closeY - openY);
+  const height = Math.max(minimumHeight, naturalHeight);
+  const midpoint = (openY + closeY) / 2;
+  return { top: midpoint - height / 2, height };
+}
+
+export function projectPriceLevel(value, min, max, height, inset = 3) {
+  if (![value, min, max, height, inset].every(Number.isFinite) || max <= min || height <= 0) return null;
+  return Math.max(inset, Math.min(height - inset, height - (value - min) / (max - min) * height));
 }
