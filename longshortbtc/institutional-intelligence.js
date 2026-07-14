@@ -101,9 +101,13 @@ export function buildInstitutionalReport({ market, simulator, macroSnapshot, pat
     const history = trades.map(t => t.learning?.weightsAfter?.[key]).filter(finite).reverse();
     return `${key.toUpperCase()}: ${history.length ? history.map(v => bar(v, 4)).join(" ") : "missing history"}`;
   });
-  const trend = market && finite(market.ema50) && finite(market.ema200) ? (market.ema50 > market.ema200 ? "positive structure" : "negative structure") : "missing data";
+  const trend = market && finite(market.ema50) && finite(market.ema200) ? (Math.abs(market.ema50-market.ema200)<=Math.max(1e-12,Math.max(Math.abs(market.ema50),Math.abs(market.ema200))*1e-8) ? "neutral structure" : market.ema50 > market.ema200 ? "positive structure" : "negative structure") : "missing data";
   const volume = market && finite(market.volRatio) ? `${market.volRatio.toFixed(2)}x baseline` : "missing data";
   const volatility = market && finite(market.bbUpper) && finite(market.bbLower) && market.close > 0 ? `${((market.bbUpper-market.bbLower)/market.close*100).toFixed(2)}% band width` : "missing data";
+  const bandState = market && finite(market.bbUpper) && finite(market.bbLower) && finite(market.close)
+    ? Math.abs(market.bbUpper-market.bbLower)<=Math.max(1e-12,Math.abs(market.close)*1e-8) ? "flat/neutral"
+      : market.close >= market.bbUpper ? "above upper" : market.close <= market.bbLower ? "below lower" : "inside bands"
+    : "missing data";
   const macroValid = macroSnapshot && finite(macroSnapshot.score) && finite(macroSnapshot.updatedAt) && macroSnapshot.stale !== true;
   const macro = macroValid ? `${macroSnapshot.score}% \u00B7 intensity only \u00B7 ${macroSnapshot.source || "source missing"}` : "missing or stale data";
   const patternRows = patterns.length ? patterns.map(p => `${p.name}: ${p.status} (${p.outcomes}/${p.occurrences})`) : ["No validated candidates; insufficient evidence"];
@@ -119,9 +123,11 @@ export function buildInstitutionalReport({ market, simulator, macroSnapshot, pat
   const lines = [
     "Adaptive Strategy Intelligence Report",
     "1. Market Context", `Trend: ${trend}`, `Volume: ${volume}`, `Volatility: ${volatility}`,
-    `Structure/EMA: ${trend}`, `RSI: ${finite(market?.rsi) ? market.rsi.toFixed(1) : "missing data"}`,
-    `MACD: ${finite(market?.hist) ? market.hist.toFixed(4) : "missing data"}`, "S/R: confirmed structures only",
-    "2. Indicator Weights", ...(weightRows.length ? weightRows : ["missing data"]),
+    "Current Indicator Readings", `Structure/EMA: ${trend}`, `RSI (14): ${finite(market?.rsi) ? market.rsi.toFixed(1) : "missing data"}`,
+    `MACD histogram: ${finite(market?.hist) ? market.hist.toFixed(4) : "missing data"}`, `Volume/current vs previous 20: ${volume}`,
+    `Bollinger: ${bandState}; ${volatility}`, `EMA 50: ${finite(market?.ema50) ? market.ema50.toFixed(2) : "missing data"}`,
+    `EMA 200: ${finite(market?.ema200) ? market.ema200.toFixed(2) : "missing data"}`, "S/R: confirmed structures only",
+    "2. Adaptive Indicator Weights", ...(weightRows.length ? weightRows : ["missing data"]),
     "3. Indicator Evolution", `Priority evolution sample: ${trades.filter(t=>t.learning?.weightsAfter).length}/100`, ...evolution,
     "4. Pattern Analysis", ...patternRows, `Latest price-volume eligibility check: ${divergenceSummary}`,
     `Recent divergence checks: ${decisions.length}/100; conflict/unavailable vetoes: ${blockedDivergence}`,

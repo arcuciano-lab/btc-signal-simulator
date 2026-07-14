@@ -36,6 +36,17 @@ test("indicator weights disclose missing or non-finite metrics instead of decept
   assert.doesNotMatch(report, /NaN%|â|Â/);
 });
 
+test("report separates current readings from adaptive weights and preserves EMA 50/200", () => {
+  const market={close:100,rsi:50,hist:0,volRatio:2,bbLower:90,bbUpper:110,ema50:99,ema200:98};
+  const weights={rsi:20,macd:20,volume:10,bands:15,emaTrend:25,ema50:10};
+  const report=buildInstitutionalReport({market,simulator:{trades:[],weights,riskControl:{}}});
+  assert.match(report,/Current Indicator Readings/);assert.match(report,/2\. Adaptive Indicator Weights/);
+  assert.match(report,/RSI \(14\): 50\.0/);assert.match(report,/MACD histogram: 0\.0000/);
+  assert.match(report,/Volume\/current vs previous 20: 2\.00x baseline/);
+  assert.match(report,/Bollinger: inside bands/);assert.match(report,/EMA 50: 99\.00/);assert.match(report,/EMA 200: 98\.00/);
+  assert.doesNotMatch(report,/EMA 3|NaN|â|Â/);assert.ok(report.split("\n").every(line=>line.length===78));
+});
+
 test("priority hundred dominates contradictory archive and archive cannot rescue pattern compatibility", () => {
   const recent=Array.from({length:100},()=>({net:-.01,candidateIds:["ema-alignment"]}));
   const archive=Array.from({length:900},()=>({net:.01,candidateIds:["ema-alignment"]}));
