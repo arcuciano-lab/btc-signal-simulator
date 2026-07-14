@@ -2,6 +2,7 @@ import { analyze } from "./strategy.js";
 import { calculateMacroImpact, classifyMacroEventScore, scoreMacroEvent } from "./macro-impact.js";
 import { createSimulator, getConsensus, getMarkToMarket, isValidCandle, migrateSimulator, processSimulator as updateSimulator, TIMEFRAMES } from "./simulator.js";
 import { buildInstitutionalReport, buildPatternEvidence, validatePattern } from "./institutional-intelligence.js";
+import { calculateCandlePriceDomain, selectVisibleCandles } from "./price-chart.js";
 const SIM_KEY = "btc-signal-simulator-v6";
 // Legacy leverageReason payloads are intentionally ignored by the v6 reset.
 const LEGACY_SIM_KEYS = ["btc-signal-simulator-v5", "btc-signal-simulator-v4", "btc-signal-simulator-v3", "btc-signal-simulator-v2", "btc-signal-simulator-v1"];
@@ -218,7 +219,7 @@ function render(rows, current, prior24) {
   $("signalNote").textContent = zone === "extreme" ? `This timeframe is in the extreme ${dominant.toLowerCase()} zone. The simulator enters only when at least three timeframes agree.` : "No extreme zone yet. The simulator remains patient and out of the market.";
   $("chartTitle").textContent = `BTC / USDT · ${labelTf(state.tf)}`;
   renderMetrics(current);
-  $("chartRangeLabel").textContent=`PRECIO · ÃƒÆ’Ã…Â¡LTIMAS ${VISIBLE_CANDLE_COUNT} VELAS`;
+  $("chartRangeLabel").textContent=`PRECIO · ÚLTIMAS ${VISIBLE_CANDLE_COUNT} VELAS`;
   drawCharts(rows.slice(-VISIBLE_CANDLE_COUNT));
   renderSimulator();
   $("updated").textContent = `Cierre analizado: ${new Date(current.closeTime).toLocaleString("es-ES", {dateStyle:"short",timeStyle:"short"})}`;
@@ -349,12 +350,11 @@ function drawCharts(rows) {
 }
 
 function drawPriceChart(rows) {
+  rows=selectVisibleCandles(rows,VISIBLE_CANDLE_COUNT);if(!rows.length)return;
   const surface=setupCanvas("priceChart"); if(!surface)return; const {ctx,W,H}=surface;
   const axisW=70, plotW=Math.max(100,W-axisW), chartH=H-22;
   const sets=[{v:rows.map(r=>r.ema50),c:"#ffe600",w:1.4},{v:rows.map(r=>r.ema200),c:"#ff3567",w:1.4}];
-  const bandValues=state.chartIndicators.bollinger?rows.flatMap(r=>[r.bbUpper,r.bbLower]):[];
-  const trade=state.simulator.position,tradeLevels=trade?[trade.weightedAverage,trade.riskBoundary,trade.liquidationBoundary,...trade.legs.map(leg=>leg.fillPrice)]:[];
-  const all=[...rows.flatMap(r=>[r.high,r.low]),...sets.flatMap(s=>s.v),...bandValues,...tradeLevels,...(trade?.structuralPartials||[]).map(p=>p.level)].filter(Number.isFinite), rawMin=Math.min(...all), rawMax=Math.max(...all), pad=(rawMax-rawMin)*.08||1, min=rawMin-pad,max=rawMax+pad;
+  const {min,max}=calculateCandlePriceDomain(rows);
   ctx.strokeStyle="#182127";ctx.lineWidth=1;
   for(let i=0;i<=4;i++){const gy=chartH*i/4;ctx.beginPath();ctx.moveTo(0,gy);ctx.lineTo(plotW,gy);ctx.stroke()}
   for(let i=1;i<7;i++){const gx=plotW*i/7;ctx.beginPath();ctx.moveTo(gx,0);ctx.lineTo(gx,chartH);ctx.stroke()}
@@ -378,7 +378,8 @@ function drawPriceChart(rows) {
 
 function drawOpenTradeLine(ctx,rows,min,max,W,H,slot){
   const trade=state.simulator.position;if(!trade)return;
-  const color=trade.side==="long"?"#00f5a0":"#ff3567",lineY=H-(trade.weightedAverage-min)/(max-min)*H,riskY=clamp(H-(trade.riskBoundary-min)/(max-min)*H,3,H-3),liquidationY=clamp(H-(trade.liquidationBoundary-min)/(max-min)*H,3,H-3);
+  const projectLevel=value=>clamp(H-(value-min)/(max-min)*H,3,H-3);
+  const color=trade.side==="long"?"#00f5a0":"#ff3567",lineY=projectLevel(trade.weightedAverage),riskY=projectLevel(trade.riskBoundary),liquidationY=projectLevel(trade.liquidationBoundary);
   const entryIndex=rows.findIndex(r=>r.closeTime>=trade.entryTime),startX=entryIndex>=0?(entryIndex+.5)*slot:0;
   ctx.save();
   ctx.fillStyle="#ff35670d";ctx.fillRect(startX,Math.min(lineY,riskY),W-startX,Math.abs(riskY-lineY));
