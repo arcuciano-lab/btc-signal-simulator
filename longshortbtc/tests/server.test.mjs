@@ -1,7 +1,7 @@
 ﻿import test, { after, before, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { parseEconomicCalendar, resetServerState, server } from "../server.mjs";
+import { parseBlsCalendar, parseEconomicCalendar, resetServerState, server } from "../server.mjs";
 
 const originalFetch = globalThis.fetch;
 let baseUrl;
@@ -41,6 +41,9 @@ test("dashboard ships a fixed 120-candle chart, default MACD, and one signal ban
   const app = await appResponse.text();
 
   assert.match(page, /id="signalBanner"/);
+  assert.equal(page.match(/class="timeframes"/g)?.length, 1);
+  assert.ok(page.indexOf("class=\"chart-card\"") < page.indexOf("class=\"timeframes\""));
+  assert.ok(page.indexOf("class=\"timeframes\"") < page.indexOf("id=\"priceChart\""));
   assert.doesNotMatch(page, /market-ticker|data-candle-count/);
   assert.match(page, /LAST 120 CANDLES|\u00daLTIMAS 120 VELAS/);
   assert.match(app, /const VISIBLE_CANDLE_COUNT = 120;/);
@@ -95,11 +98,49 @@ test("economic calendar parser keeps only high-impact events and normalizes valu
   assert.deepEqual(parseEconomicCalendar(html, Date.parse("2026-07-14T12:00:00Z")), [{ title:"IPC interanual", currency:"USD", impact:"high", timestamp:Date.parse("2026-07-14T14:30:00"), actual:"2,7%", forecast:"2,8%", previous:"2,9%" }]);
 });
 
+test("economic calendar parser reads Investing's current Next.js hydration payload", () => {
+  const state = { props:{ pageProps:{ stores:{ economicCalendarStore:{ calendarEventsByDate:{ "2026-07-14":[
+    { event:"IPC", suffix:"(Anual)", currency:"USD", importance:"3", time:"2026-07-14T12:30:00Z", actual:"2,7%", forecast:"2,8%", previous:"2,9%" },
+    { event:"Dato medio", currency:"EUR", importance:"2", time:"2026-07-14T13:00:00Z" }
+  ] } } } } } };
+  const html = `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(state)}</script>`;
+  assert.deepEqual(parseEconomicCalendar(html, Date.parse("2026-07-14T12:00:00Z")), [{ title:"IPC (Anual)", currency:"USD", impact:"high", timestamp:Date.parse("2026-07-14T12:30:00Z"), actual:"2,7%", forecast:"2,8%", previous:"2,9%" }]);
+});
+
+test("BLS calendar parser preserves the official US Eastern release time", () => {
+  const ics = "BEGIN:VEVENT\r\nDTSTART;TZID=US-Eastern:20260714T083000\r\nSUMMARY:Consumer Price Index\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nDTSTART;TZID=US-Eastern:20260714T100000\r\nSUMMARY:Regional data unavailable\r\nEND:VEVENT";
+  assert.deepEqual(parseBlsCalendar(ics, Date.parse("2026-07-14T00:00:00Z")), [{ title:"Consumer Price Index", currency:"USD", impact:"high", timestamp:Date.parse("2026-07-14T12:30:00Z"), actual:"", forecast:"", previous:"" }]);
+});
+
+test("BLS calendar parser applies the winter US Eastern offset", () => {
+  const ics = "BEGIN:VEVENT\r\nDTSTART;TZID=US-Eastern:20260114T083000\r\nSUMMARY:Producer Price Index\r\nEND:VEVENT";
+  assert.equal(parseBlsCalendar(ics, Date.parse("2026-01-14T00:00:00Z"))[0].timestamp, Date.parse("2026-01-14T13:30:00Z"));
+});
+
 test("macro endpoint degrades safely when the upstream calendar fails", async () => {
   globalThis.fetch = async () => new Response("blocked", { status:403 });
   const response = await originalFetch(`${baseUrl}/api/macro-calendar`);
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { items:[], updatedAt:0, expiresAt:0, stale:true, source:"Investing.com", unavailable:true });
+  assert.deepEqual(await response.json(), { items:[], updatedAt:0, expiresAt:0, stale:true, source:"Investing.com / U.S. Bureau of Labor Statistics", unavailable:true });
+});
+
+test("macro endpoint falls back to the official BLS schedule", async () => {
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) return new Response("changed markup", { status:200 });
+    return new Response("BEGIN:VEVENT\r\nDTSTART;TZID=US-Eastern:20990101T083000\r\nSUMMARY:Employment Situation\r\nEND:VEVENT", { status:200 });
+  };
+  const payload = await (await originalFetch(`${baseUrl}/api/macro-calendar`)).json();
+  assert.equal(payload.source, "U.S. Bureau of Labor Statistics");
+  assert.equal(payload.fallback, true);
+  assert.equal(payload.items[0].title, "Employment Situation");
+  assert.equal(calls, 2);
+  const cached = await (await originalFetch(`${baseUrl}/api/macro-calendar`)).json();
+  assert.equal(cached.source, "U.S. Bureau of Labor Statistics");
+  assert.equal(cached.fallback, true);
+  assert.equal(cached.items[0].title, "Employment Situation");
+  assert.equal(calls, 2);
 });
 
 test("macro endpoint coalesces concurrent requests and reuses its cache", async () => {

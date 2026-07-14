@@ -8,6 +8,7 @@ const ROOT = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 4173);
 const ALLOWED_INTERVALS = new Set(["5m", "15m", "1h", "4h"]);
 const ECONOMIC_CALENDAR_URL = "https://es.investing.com/economic-calendar/";
+const BLS_CALENDAR_URL = "https://www.bls.gov/schedule/news_release/bls.ics";
 const NEWS_SOURCES = [
   { source:"FED", category:"MACRO", url:"https://www.federalreserve.gov/feeds/press_monetary.xml", limit:4 },
   { source:"BCE", category:"MACRO UE", url:"https://www.ecb.europa.eu/rss/press.html", limit:4 },
@@ -74,7 +75,7 @@ function calendarField(row, classPattern) {
 }
 export function parseEconomicCalendar(html, now = Date.now()) {
   const rows = [...html.matchAll(/<tr\b[^>]*(?:id=["']eventRowId_[^"']+|class=["'][^"']*js-event-item[^"']*)[^>]*>[\s\S]*?<\/tr>/gi)].map(match => match[0]);
-  const events = rows.map(row => {
+  const legacyEvents = rows.map(row => {
     const fullIcons = (row.match(/grayFullBullishIcon/gi) || []).length;
     const impact = fullIcons >= 3 || /(?:data-img_key|class)=["'][^"']*bull3\b/i.test(row) || /importance(?:Level)?=["']3["']/i.test(row) ? "high" : "";
     const currency = calendarField(row, "flagCur|left.*flag").replace(/[^A-Z]/g, "").slice(0, 3);
@@ -86,10 +87,53 @@ export function parseEconomicCalendar(html, now = Date.now()) {
     return { title, currency, impact, timestamp, actual:calendarField(row, "act"), forecast:calendarField(row, "fore"), previous:calendarField(row, "prev") };
   }).filter(item => item.impact === "high" && item.title && item.timestamp !== null && item.timestamp >= now - 12 * 60 * 60 * 1000)
     .sort((a, b) => a.timestamp - b.timestamp);
+  const nextData = html.match(/<script[^>]+id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i)?.[1];
+  let calendarEventsByDate = null;
+  if (nextData) {
+    try {
+      const pending = [JSON.parse(nextData)];
+      while (pending.length && !calendarEventsByDate) {
+        const value = pending.pop();
+        if (!value || typeof value !== "object") continue;
+        if (value.economicCalendarStore?.calendarEventsByDate) calendarEventsByDate = value.economicCalendarStore.calendarEventsByDate;
+        else pending.push(...Object.values(value));
+      }
+    } catch {}
+  }
+  const hydratedEvents = Object.values(calendarEventsByDate || {}).flat().map(event => ({
+    title:[event.event, event.suffix].filter(Boolean).join(" "), currency:String(event.currency || "").toUpperCase().slice(0, 3), impact:String(event.importance) === "3" ? "high" : "",
+    timestamp:Date.parse(event.actual_time || event.time), actual:String(event.actual || ""), forecast:String(event.forecast || ""), previous:String(event.previous || "")
+  })).filter(item => item.impact === "high" && item.title && Number.isFinite(item.timestamp) && item.timestamp >= now - 12 * 60 * 60 * 1000);
+  const events = [...legacyEvents, ...hydratedEvents].sort((a, b) => a.timestamp - b.timestamp);
   return [...new Map(events.map(item => [`${item.timestamp}\u0000${item.currency}\u0000${item.title.toLocaleLowerCase("es")}`, item])).values()].slice(0, 10);
 }
+
+function zonedTimestamp(parts, timeZone) {
+  if (timeZone === "US-Eastern") timeZone = "America/New_York";
+  let timestamp = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute);
+  const formatter = new Intl.DateTimeFormat("en-CA", { timeZone, year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", hourCycle:"h23" });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const observed = Object.fromEntries(formatter.formatToParts(timestamp).filter(part => part.type !== "literal").map(part => [part.type, Number(part.value)]));
+    timestamp += Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute) - Date.UTC(observed.year, observed.month - 1, observed.day, observed.hour, observed.minute);
+  }
+  return timestamp;
+}
+export function parseBlsCalendar(ics, now = Date.now()) {
+  // BLS publishes many specialist releases. Keep only releases that routinely
+  // move rates, USD and index futures; the fallback must not invent importance.
+  const marketMoving = /consumer price index|employment situation|producer price index|job openings and labor turnover survey/i;
+  return [...ics.matchAll(/BEGIN:VEVENT([\s\S]*?)END:VEVENT/g)].map(match => {
+    const block = match[1].replace(/\r?\n[ \t]/g, "");
+    const date = block.match(/DTSTART(?:;TZID=([^:\r\n]+))?:(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})/);
+    const title = block.match(/SUMMARY:(.*)/)?.[1]?.trim() || "";
+    if (!date) return null;
+    const parts = { year:+date[2], month:+date[3], day:+date[4], hour:+date[5], minute:+date[6] };
+    const timestamp = date[1] ? zonedTimestamp(parts, date[1]) : Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute);
+    return { title, currency:"USD", impact:"high", timestamp, actual:"", forecast:"", previous:"" };
+  }).filter(item => item && marketMoving.test(item.title) && item.timestamp >= now - 12 * 60 * 60 * 1000).sort((a, b) => a.timestamp - b.timestamp).slice(0, 10);
+}
 async function fetchEconomicCalendar() {
-  if (macroCache.expiresAt > Date.now()) return { ...macroCache, stale:false, source:"Investing.com" };
+  if (macroCache.expiresAt > Date.now()) return { ...macroCache, stale:false };
   if (macroRequest) return macroRequest;
   macroRequest = (async () => {
     try {
@@ -97,9 +141,18 @@ async function fetchEconomicCalendar() {
       if (!response.ok) throw new Error(`Economic calendar: ${response.status}`);
       const items = parseEconomicCalendar(await response.text());
       if (!items.length) throw new Error("Economic calendar returned no high-impact events");
-      macroCache = { items, updatedAt:Date.now(), expiresAt:Date.now() + 15 * 60 * 1000 };
-      return { ...macroCache, stale:false, source:"Investing.com" };
-    } catch { return { ...macroCache, stale:true, source:"Investing.com", unavailable:macroCache.items.length === 0 }; }
+      macroCache = { items, updatedAt:Date.now(), expiresAt:Date.now() + 15 * 60 * 1000, source:"Investing.com" };
+      return { ...macroCache, stale:false };
+    } catch {
+      try {
+        const response = await fetch(BLS_CALENDAR_URL, { headers:{ "user-agent":"SimpleTrading/2.3 (public economic dashboard)", accept:"text/calendar" }, signal:AbortSignal.timeout(8000) });
+        if (!response.ok) throw new Error(`BLS calendar: ${response.status}`);
+        const items = parseBlsCalendar(await response.text());
+        if (!items.length) throw new Error("BLS calendar returned no events");
+        macroCache = { items, updatedAt:Date.now(), expiresAt:Date.now() + 15 * 60 * 1000, source:"U.S. Bureau of Labor Statistics", fallback:true };
+        return { ...macroCache, stale:false };
+      } catch { return { ...macroCache, stale:true, source:"Investing.com / U.S. Bureau of Labor Statistics", unavailable:macroCache.items.length === 0 }; }
+    }
   })();
   try { return await macroRequest; } finally { macroRequest = null; }
 }

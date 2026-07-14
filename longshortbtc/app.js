@@ -34,8 +34,21 @@ function renderMacroItems(items) {
   track.append(group, group.cloneNode(true));
 }
 async function loadMacroTicker() {
-  try { const response = await fetch("/api/macro-calendar"); const payload = await response.json(); renderMacroItems(Array.isArray(payload.items) ? payload.items : []); }
+  try {
+    const response = await fetch("/api/macro-calendar"); const payload = await response.json(); renderMacroItems(Array.isArray(payload.items) ? payload.items : []);
+    const source = $("macroTickerSource");
+    if (source && payload.source === "U.S. Bureau of Labor Statistics") { source.textContent = "BLS.GOV"; source.href = "https://www.bls.gov/schedule/news_release/"; }
+    else if (source) { source.textContent = "INVESTING.COM"; source.href = "https://es.investing.com/economic-calendar/"; }
+  }
   catch { renderMacroItems([]); }
+}
+
+const macroTicker = document.querySelector(".macro-ticker");
+const signalBanner = $("signalBanner");
+if (macroTicker && signalBanner && typeof ResizeObserver !== "undefined") {
+  new ResizeObserver(() => {
+    if (!signalBanner.hidden && signalBanner.offsetHeight) macroTicker.style.setProperty("--signal-banner-height", `${signalBanner.offsetHeight}px`);
+  }).observe(signalBanner);
 }
 
 const state = {

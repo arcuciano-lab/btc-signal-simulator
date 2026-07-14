@@ -38,7 +38,7 @@
         <div class="macro-ticker-viewport" aria-live="polite">
           <div id="macroTickerTrack" class="macro-ticker-track"><span class="macro-ticker-status">Cargando eventos relevantes…</span></div>
         </div>
-        <a href="https://es.investing.com/economic-calendar/" target="_blank" rel="noopener noreferrer">INVESTING.COM</a>
+        <a id="macroTickerSource" href="https://es.investing.com/economic-calendar/" target="_blank" rel="noopener noreferrer">INVESTING.COM</a>
       </section>
 
       <article id="signalBanner" class="signal-banner" aria-live="polite" hidden>
@@ -60,13 +60,6 @@
         </div>
       </article>
 
-      <nav class="timeframes" aria-label="Temporalidad">
-        <button data-tf="5m">5 min</button>
-        <button data-tf="15m">15 min</button>
-        <button data-tf="1h" class="active">1 hora</button>
-        <button data-tf="4h">4 horas</button>
-      </nav>
-
       <div id="loading" class="loading"><span></span> Calculando indicadores y consenso multitemporal…</div>
       <div id="error" class="error" hidden></div>
 
@@ -75,7 +68,15 @@
           <article class="chart-card">
             <div class="section-head">
               <div><p id="chartRangeLabel" class="eyebrow">PRECIO · ÚLTIMAS 120 VELAS</p><h2 id="chartTitle">BTC / USDT</h2></div>
-              <div class="chart-legend"><span class="l-price">Velas</span><span class="l-ema50">EMA 50</span><span class="l-ema200">EMA 200</span><span class="l-trade">Trade + TP/SL</span></div>
+              <div class="chart-head-actions">
+                <nav class="timeframes" aria-label="Temporalidad">
+                  <button type="button" data-tf="5m">5 min</button>
+                  <button type="button" data-tf="15m">15 min</button>
+                  <button type="button" data-tf="1h" class="active">1 hora</button>
+                  <button type="button" data-tf="4h">4 horas</button>
+                </nav>
+                <div class="chart-legend"><span class="l-price">Velas</span><span class="l-ema50">EMA 50</span><span class="l-ema200">EMA 200</span><span class="l-trade">Trade + TP/SL</span></div>
+              </div>
             </div>
             <div class="chart-controls" aria-label="Indicadores del gráfico">
               <button type="button" data-chart-toggle="bollinger">Bollinger</button>
