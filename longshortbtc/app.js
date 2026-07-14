@@ -1,4 +1,5 @@
-﻿import { analyze } from "./strategy.js";
+import { analyze } from "./strategy.js";
+import { calculateMacroImpact } from "./macro-impact.js";
 import { createSimulator, getConsensus, getMarkToMarket, isValidCandle, migrateSimulator, processSimulator as updateSimulator, TIMEFRAMES } from "./simulator.js";
 const SIM_KEY = "btc-signal-simulator-v3";
 const LEGACY_SIM_KEYS = ["btc-signal-simulator-v2", "btc-signal-simulator-v1"];
@@ -17,9 +18,23 @@ function macroValue(label, value) {
   span.textContent = `${label} ${value}`;
   return span;
 }
+let lastMacroItems = [];
+function updateMacroImpact(items) {
+  const impact = calculateMacroImpact(items);
+  $("macroImpactScore").textContent = impact.score;
+  $("macroImpactBand").textContent = impact.label;
+  $("macroImpact").className = `macro-impact ${impact.band}`;
+  $("macroImpact").title = impact.explanation;
+  $("macroImpactFill").style.width = `${impact.score}%`;
+  const meter = $("macroImpact").querySelector('[role="meter"]');
+  meter.setAttribute("aria-valuenow", String(impact.score));
+  meter.setAttribute("aria-valuetext", `${impact.label}: ${impact.score} de 100. Intensidad, no dirección.`);
+}
 function renderMacroItems(items) {
   const track = $("macroTickerTrack");
   track.replaceChildren();
+  lastMacroItems = items;
+  updateMacroImpact(lastMacroItems);
   if (!items.length) {
     const status = document.createElement("span"); status.className = "macro-ticker-status"; status.textContent = "Calendario macro no disponible temporalmente"; track.append(status); return;
   }
@@ -33,6 +48,8 @@ function renderMacroItems(items) {
   });
   track.append(group, group.cloneNode(true));
 }
+const macroImpactTimer = setInterval(() => updateMacroImpact(lastMacroItems), 60000);
+addEventListener("pagehide", () => clearInterval(macroImpactTimer), { once:true });
 async function loadMacroTicker() {
   try {
     const response = await fetch("/api/macro-calendar"); const payload = await response.json(); renderMacroItems(Array.isArray(payload.items) ? payload.items : []);
@@ -255,7 +272,7 @@ function drawCharts(rows) {
 function drawPriceChart(rows) {
   const surface=setupCanvas("priceChart"); if(!surface)return; const {ctx,W,H}=surface;
   const axisW=70, plotW=Math.max(100,W-axisW), chartH=H-22;
-  const sets=[{v:rows.map(r=>r.ema50),c:"#ffe600",w:1.4},{v:rows.map(r=>r.ema200),c:"#00d9ff",w:1.4}];
+  const sets=[{v:rows.map(r=>r.ema50),c:"#ffe600",w:1.4},{v:rows.map(r=>r.ema200),c:"#ff3567",w:1.4}];
   const bandValues=state.chartIndicators.bollinger?rows.flatMap(r=>[r.bbUpper,r.bbLower]):[];
   const trade=state.simulator.position,tradeLevels=trade?[trade.entry]:[];
   const all=[...rows.flatMap(r=>[r.high,r.low]),...sets.flatMap(s=>s.v),...bandValues,...tradeLevels].filter(Number.isFinite), rawMin=Math.min(...all), rawMax=Math.max(...all), pad=(rawMax-rawMin)*.08||1, min=rawMin-pad,max=rawMax+pad;

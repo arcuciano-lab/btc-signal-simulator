@@ -34,11 +34,15 @@
       </section>
 
       <section class="macro-ticker" aria-labelledby="macroTickerTitle">
-        <div class="macro-ticker-label"><span>ALTO IMPACTO</span><strong id="macroTickerTitle">CALENDARIO MACRO</strong></div>
+        <div class="macro-ticker-label"><span>IMPACTO MACRO</span><strong id="macroTickerTitle">CALENDARIO MACRO</strong><em id="macroImpactBand">CALCULANDO</em></div>
         <div class="macro-ticker-viewport" aria-live="polite">
           <div id="macroTickerTrack" class="macro-ticker-track"><span class="macro-ticker-status">Cargando eventos relevantes…</span></div>
         </div>
-        <a id="macroTickerSource" href="https://es.investing.com/economic-calendar/" target="_blank" rel="noopener noreferrer">INVESTING.COM</a>
+        <div class="macro-impact" id="macroImpact" title="La intensidad combina importancia oficial, proximidad temporal y sorpresa comparable; no indica dirección del mercado.">
+          <div class="macro-impact-value"><strong id="macroImpactScore">—</strong><small>/100</small></div>
+          <div class="macro-impact-meter" role="meter" aria-label="Intensidad del impacto macroeconómico" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="macroImpactFill"></i></div>
+          <a id="macroTickerSource" href="https://es.investing.com/economic-calendar/" target="_blank" rel="noopener noreferrer">INVESTING.COM</a>
+        </div>
       </section>
 
       <article id="signalBanner" class="signal-banner" aria-live="polite" hidden>
