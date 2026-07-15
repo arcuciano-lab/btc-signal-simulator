@@ -1,8 +1,0 @@
-services:
-  - type: web
-    name: btc-signal-simulator
-    runtime: node
-    plan: free
-    buildCommand: npm install
-    startCommand: npm start
-    healthCheckPath: /health
