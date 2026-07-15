@@ -1,6 +1,6 @@
 ﻿import test from "node:test";
 import assert from "node:assert/strict";
-import { BASKET_MARGIN_FRACTIONS, STRATEGY_VERSION, TIMEFRAMES, createSimulator, migrateSimulator, processSimulator } from "../simulator.js";
+import { BASKET_MARGIN_FRACTIONS, ENTRY_TIERS, STRATEGY_VERSION, TIMEFRAMES, createSimulator, migrateSimulator, processSimulator } from "../simulator.js";
 import { WEIGHTS } from "../strategy.js";
 const parts=Object.fromEntries(Object.keys(WEIGHTS).map(k=>[k,.25]));
 const c=(time=1,closeTime=6000000,open=100,high=101,low=99,close=100)=>({time,closeTime,open,high,low,close,volume:100,quoteVolume:10000});
@@ -14,6 +14,9 @@ test("future 5m context fails closed",()=>{const s=createSimulator(),m=current()
 test("stale 5m context fails closed",()=>{const s=createSimulator(),m=current();m["5m"].closeTime=1;const bar=c(300001,360000);Object.values(m).forEach(x=>x.closeTime=360000);m["5m"].closeTime=1;assert.equal(processSimulator(s,m,{"1m":[bar]}).invalidData,true);});
 test("weak setup requires fresh macro available at decision",()=>{const weak=current(70);for(const macro of [undefined,{score:90,stale:true,availableFrom:1},{score:90,stale:false,availableFrom:6000001},{score:90,stale:false,availableFrom:1-1800001}]){const s=createSimulator();processSimulator(s,weak,{"1m":history()},{macroSnapshot:macro});assert.equal(s.position,null);}const s=createSimulator();processSimulator(s,weak,{"1m":history()},{macroSnapshot:{score:90,stale:false,availableFrom:5999000}});assert.ok(s.position);});
 test("macro score below 80 cannot enable weak setup",()=>{const s=createSimulator();processSimulator(s,current(70),{"1m":history()},{macroSnapshot:{score:79,stale:false,availableFrom:5999000}});assert.equal(s.position,null);});
+test("unanimous 72 consensus opens and persists the flexible confirmed tier without macro",()=>{const s=createSimulator();const result=processSimulator(s,current(ENTRY_TIERS.flexible.score),{"1m":history()});assert.equal(result.opened,true);assert.equal(s.position.entryDecision.setupClass,"flexible-confirmed");assert.equal(migrateSimulator(JSON.parse(JSON.stringify(s))).position.entryDecision.setupClass,"flexible-confirmed");});
+test("flexible tier does not lower the three-timeframe normal threshold",()=>{const s=createSimulator(),m=current(76);m["1h"].long=59;m["1h"].short=41;const result=processSimulator(s,m,{"1m":history()});assert.equal(result.opened,false);assert.equal(s.position,null);});
+test("sub-flexible unanimous consensus still requires fresh macro",()=>{const s=createSimulator();const result=processSimulator(s,current(ENTRY_TIERS.flexible.score-1),{"1m":history()});assert.equal(result.opened,false);assert.equal(s.position,null);});
 test("first leg modeled liquidation is remote and does not mimic an 0.8% loss stop",()=>{const p=open().position;assert.ok(p.liquidationBoundary>0&&p.liquidationBoundary<10);assert.ok(p.riskBoundary<p.weightedAverage*.1);});
 test("full long risk boundary dominates modeled liquidation",()=>{const p=canonicalFull("long").position;assert.ok(p.riskBoundary>p.liquidationBoundary);assert.ok(p.riskBoundary>90);});
 test("full short risk boundary dominates modeled liquidation",()=>{const p=canonicalFull("short").position;assert.ok(p.riskBoundary<p.liquidationBoundary);assert.ok(p.riskBoundary<110);});

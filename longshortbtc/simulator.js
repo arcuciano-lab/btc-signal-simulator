@@ -11,6 +11,11 @@ export const STRATEGY_VERSION = "institutional-1m-basket-10x-v1";
 export const TF_INFLUENCE = { "1m": .40, "5m": .25, "15m": .20, "1h": .15 };
 export const BASKET_MARGIN_FRACTIONS = Object.freeze([.01, .02, .04, .08]);
 export const FIXED_LEVERAGE = 10;
+export const ENTRY_TIERS = Object.freeze({
+  normal: Object.freeze({ score: 75, agreement: 3 }),
+  flexible: Object.freeze({ score: 72, agreement: 4 }),
+  macro: Object.freeze({ score: 68, agreement: 3, macroScore: 80 })
+});
 
 const INITIAL_BANK = 1000;
 const FEE_RATE = .002;
@@ -149,7 +154,7 @@ function canonicalDecisionSnapshots(rows) {
     const divergence=canonicalDivergenceResult(row?.divergence);
     if(seen.has(key)||row?.divergenceFeatureSchemaVersion!==DIVERGENCE_FEATURE_SCHEMA_VERSION||!["long","short"].includes(row?.side)||!finite(row?.closeTime)||!divergence||divergence.evaluatedAt!==row.closeTime||typeof row.opened!=="boolean")continue;
     const gate=divergenceGate(row.side,divergence);if(row.opened!==gate.allowed)continue;
-    seen.add(key);out.push({divergenceFeatureSchemaVersion:DIVERGENCE_FEATURE_SCHEMA_VERSION,closeTime:row.closeTime,side:row.side,opened:row.opened,gate,divergence,consensus:row.consensus&&typeof row.consensus==="object"?structuredClone(row.consensus):null,macro:row.macro&&typeof row.macro==="object"?structuredClone(row.macro):null,setupClass:["strong","weak-with-fresh-macro"].includes(row.setupClass)?row.setupClass:"strong"});if(out.length===100)break;
+    seen.add(key);out.push({divergenceFeatureSchemaVersion:DIVERGENCE_FEATURE_SCHEMA_VERSION,closeTime:row.closeTime,side:row.side,opened:row.opened,gate,divergence,consensus:row.consensus&&typeof row.consensus==="object"?structuredClone(row.consensus):null,macro:row.macro&&typeof row.macro==="object"?structuredClone(row.macro):null,setupClass:["strong","flexible-confirmed","weak-with-fresh-macro"].includes(row.setupClass)?row.setupClass:"strong"});if(out.length===100)break;
   }return out;
 }
 
@@ -299,7 +304,7 @@ function validInputs(currentByTf,rowsByTf){
   const exec=rowsByTf?.["1m"]?.at(-1);if(!exec||!isValidCandle(exec)||currentByTf?.["1m"]?.closeTime!==exec.closeTime)return false;
   return TIMEFRAMES.every(tf=>{const x=currentByTf[tf];return x&&finite(x.long)&&finite(x.short)&&finite(x.close)&&finite(x.closeTime)&&x.closeTime<=exec.closeTime&&exec.closeTime-x.closeTime<=CONTEXT_MAX_AGE[tf];})&&rowsByTf["1m"].every(isValidCandle);
 }
-function macroEligible(macro,decisionTime){const available=macro?.availableFrom??macro?.observedAt??macro?.updatedAt;return finite(macro?.score)&&macro.score>=80&&macro.stale===false&&finite(available)&&available<=decisionTime&&decisionTime-available<=MACRO_MAX_AGE;}
+function macroEligible(macro,decisionTime){const available=macro?.availableFrom??macro?.observedAt??macro?.updatedAt;return finite(macro?.score)&&macro.score>=ENTRY_TIERS.macro.macroScore&&macro.stale===false&&finite(available)&&available<=decisionTime&&decisionTime-available<=MACRO_MAX_AGE;}
 
 export function processSimulator(sim,currentByTf,rowsByTf,{macroSnapshot}={}) {
   if(!validInputs(currentByTf,rowsByTf))return{invalidData:true};
@@ -310,9 +315,15 @@ export function processSimulator(sim,currentByTf,rowsByTf,{macroSnapshot}={}) {
   if(sim.bank<=GLOBAL_FLOOR+EPS&&!sim.riskControl.halted)sim.riskControl={halted:true,reason:"Global 20% equity halt",haltedAt:candle.closeTime,threshold:GLOBAL_FLOOR};
   if(sim.riskControl.halted)return{halted:true};
   if(!sim.position){const c=getConsensus(currentByTf);
-    const eligibleMacro=macroEligible(macroSnapshot,candle.closeTime),long=(c.long>=75&&c.agreementLong>=3)||(eligibleMacro&&c.long>=68&&c.agreementLong>=3),short=(c.short>=75&&c.agreementShort>=3)||(eligibleMacro&&c.short>=68&&c.agreementShort>=3);
+    const eligibleMacro=macroEligible(macroSnapshot,candle.closeTime);
+    const qualifies=(score,agreement)=>(score>=ENTRY_TIERS.normal.score&&agreement>=ENTRY_TIERS.normal.agreement)
+      ||(score>=ENTRY_TIERS.flexible.score&&agreement>=ENTRY_TIERS.flexible.agreement)
+      ||(eligibleMacro&&score>=ENTRY_TIERS.macro.score&&agreement>=ENTRY_TIERS.macro.agreement);
+    const long=qualifies(c.long,c.agreementLong),short=qualifies(c.short,c.agreementShort);
     if(long||short){const side=long?"long":"short",divergence=analyzePriceVolumeDivergence(rowsByTf["1m"]),gate=divergenceGate(side,divergence);
-      const setupClass=(side==="long"?c.long:c.short)>=75?"strong":eligibleMacro?"weak-with-fresh-macro":"ineligible";
+      const score=side==="long"?c.long:c.short,agreement=side==="long"?c.agreementLong:c.agreementShort;
+      const setupClass=score>=ENTRY_TIERS.normal.score&&agreement>=ENTRY_TIERS.normal.agreement?"strong"
+        :score>=ENTRY_TIERS.flexible.score&&agreement>=ENTRY_TIERS.flexible.agreement?"flexible-confirmed":"weak-with-fresh-macro";
       const snapshot={divergenceFeatureSchemaVersion:DIVERGENCE_FEATURE_SCHEMA_VERSION,closeTime:candle.closeTime,side,opened:gate.allowed,gate,divergence,consensus:{...c},macro:{eligible:eligibleMacro,score:finite(macroSnapshot?.score)?macroSnapshot.score:null},setupClass};
       sim.decisionSnapshots=canonicalDecisionSnapshots([snapshot,...(sim.decisionSnapshots||[])]);
       if(gate.allowed)openBasket(sim,side,market,candle,structuredClone(snapshot));
