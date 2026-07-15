@@ -1,0 +1,11 @@
+{
+  "name": "btc-strategy-kernel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "smoke": "node src/cli.js",
+    "evolve": "node src/evolve-cli.js"
+  }
+}
