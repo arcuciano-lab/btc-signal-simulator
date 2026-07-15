@@ -62,6 +62,32 @@ test("klines validates intervals before contacting the upstream provider", async
   assert.equal(calls, 0);
 });
 
+test("Alpaca market context is cached by completed bar and exposes causal source metadata",async()=>{
+  let calls=0;
+  globalThis.fetch=async (url,options)=>{calls++;const parsed=new URL(url);assert.equal(parsed.hostname,"data.alpaca.markets");assert.equal(parsed.searchParams.get("symbols"),"BTC/USD");assert.equal(parsed.searchParams.get("timeframe"),"4Hour");assert.equal(parsed.searchParams.get("limit"),"43");assert.equal(parsed.searchParams.get("sort"),"asc");assert.deepEqual(options.headers,{});const now=Date.now(),step=4*60*60*1000;
+    const rows=Array.from({length:10},(_,i)=>({t:new Date(now-(10-i)*step).toISOString(),o:100+i,h:102+i,l:99+i,c:101+i,v:100}));return new Response(JSON.stringify({bars:{"BTC/USD":rows}}),{status:200});};
+  const first=await originalFetch(`${baseUrl}/api/market-context`),payload=await first.json();
+  const second=await originalFetch(`${baseUrl}/api/market-context`);
+  assert.equal(second.status,200);assert.equal(calls,1);assert.equal(payload.schemaVersion,1);assert.equal(payload.stale,false);
+  assert.equal(payload.source,"Alpaca Market Data");assert.ok(payload.asOf<=payload.observedAt);assert.ok(payload.availableFrom<=payload.expiresAt);
+});
+
+test("Alpaca credentials stay server-side and use only official header names",async()=>{
+  const oldId=process.env.APCA_API_KEY_ID,oldSecret=process.env.APCA_API_SECRET_KEY;process.env.APCA_API_KEY_ID="test-id";process.env.APCA_API_SECRET_KEY="test-secret";
+  try{globalThis.fetch=async(_url,options)=>{assert.deepEqual(options.headers,{"APCA-API-KEY-ID":"test-id","APCA-API-SECRET-KEY":"test-secret"});return new Response(JSON.stringify({bars:{"BTC/USD":[]}}),{status:200});};
+    const response=await originalFetch(`${baseUrl}/api/market-context`),payload=await response.json();assert.equal(response.status,200);assert.equal(payload.unavailable,true);assert.equal(payload.source,"Alpaca Market Data");}
+  finally{if(oldId===undefined)delete process.env.APCA_API_KEY_ID;else process.env.APCA_API_KEY_ID=oldId;if(oldSecret===undefined)delete process.env.APCA_API_SECRET_KEY;else process.env.APCA_API_SECRET_KEY=oldSecret;}
+});
+
+test("partial Alpaca credentials are omitted to preserve unauthenticated access",async()=>{
+  const oldId=process.env.APCA_API_KEY_ID,oldSecret=process.env.APCA_API_SECRET_KEY;
+  try{for(const credentials of [{id:"id-only",secret:undefined},{id:undefined,secret:"secret-only"}]){resetServerState();if(credentials.id===undefined)delete process.env.APCA_API_KEY_ID;else process.env.APCA_API_KEY_ID=credentials.id;if(credentials.secret===undefined)delete process.env.APCA_API_SECRET_KEY;else process.env.APCA_API_SECRET_KEY=credentials.secret;
+      globalThis.fetch=async(_url,options)=>{assert.deepEqual(options.headers,{});return new Response(JSON.stringify({bars:{"BTC/USD":[]}}),{status:200});};const response=await originalFetch(`${baseUrl}/api/market-context`);assert.equal(response.status,200);}}
+  finally{if(oldId===undefined)delete process.env.APCA_API_KEY_ID;else process.env.APCA_API_KEY_ID=oldId;if(oldSecret===undefined)delete process.env.APCA_API_SECRET_KEY;else process.env.APCA_API_SECRET_KEY=oldSecret;}
+});
+
+test("Alpaca failure degrades to explicitly unavailable Alpaca context",async()=>{globalThis.fetch=async()=>new Response("down",{status:503});const response=await originalFetch(`${baseUrl}/api/market-context`),payload=await response.json();assert.equal(response.status,200);assert.equal(payload.stale,true);assert.equal(payload.unavailable,true);assert.equal(payload.source,"Alpaca Market Data");});
+
 test("klines truncates decimal limits and deduplicates concurrent and cached requests", async () => {
   let calls = 0;
   let release;

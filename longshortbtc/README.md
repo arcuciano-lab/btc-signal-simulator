@@ -39,3 +39,5 @@ El simulador comienza con 1.000 USDT, guarda el diario de trades en el navegador
 4. Al terminar recibirás una dirección pública `https://...onrender.com`.
 
 La instancia gratuita puede dormirse después de un periodo sin visitas. El diario y el aprendizaje se almacenan en `localStorage`, por lo que pertenecen a cada navegador y no se comparten entre dispositivos o visitantes.
+
+El contexto direccional de cuatro horas usa Alpaca Market Data. Las barras históricas públicas pueden funcionar sin autenticación; opcionalmente configura `APCA_API_KEY_ID` y `APCA_API_SECRET_KEY` como variables de entorno privadas del servicio. Las credenciales se envían solamente desde el servidor a Alpaca y nunca llegan al navegador.

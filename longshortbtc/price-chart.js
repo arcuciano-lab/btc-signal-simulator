@@ -26,8 +26,3 @@ export function calculateCandleBodyGeometry(openY, closeY, minimumHeight = 2) {
   const midpoint = (openY + closeY) / 2;
   return { top: midpoint - height / 2, height };
 }
-
-export function projectPriceLevel(value, min, max, height, inset = 3) {
-  if (![value, min, max, height, inset].every(Number.isFinite) || max <= min || height <= 0) return null;
-  return Math.max(inset, Math.min(height - inset, height - (value - min) / (max - min) * height));
-}

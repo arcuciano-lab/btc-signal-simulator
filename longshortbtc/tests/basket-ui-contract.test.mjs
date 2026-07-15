@@ -9,3 +9,8 @@ test("all known pre-basket storage keys are named for cleanup",()=>{for(const v 
 test("UI presents recent and total memory horizons truthfully",()=>{assert.match(app,/RECENT.*\/100.*TOTAL.*\/1000/);});
 test("report states modeled cross-margin and gap qualification",()=>{assert.match(report,/synthetic cross-margin at 0\.5% maintenance/);assert.match(report,/gaps or liquidation can exceed/);});
 test("bounce MACD reaction uses production hist property",()=>{assert.match(simulator,/market\.hist/);assert.doesNotMatch(simulator,/macdHistogram/);});
+test("price chart contains no active-trade overlay while the ASCII panel remains wired",()=>{
+  for(const forbidden of [/drawOpenTradeLine/,/drawTradeLevel/,/HARD BASKET RISK/,/MODELED CROSS-MARGIN LIQUIDATION/,/PARTIAL 25%/])assert.doesNotMatch(app,forbidden);
+  assert.match(app,/buildActiveTradePanel/);
+  assert.match(app,/tradePanel\.textContent = panel\.text/);
+});

@@ -153,8 +153,11 @@ function canonicalDecisionSnapshots(rows) {
   for(const row of rows){const key=row?.closeTime;
     const divergence=canonicalDivergenceResult(row?.divergence);
     if(seen.has(key)||row?.divergenceFeatureSchemaVersion!==DIVERGENCE_FEATURE_SCHEMA_VERSION||!["long","short"].includes(row?.side)||!finite(row?.closeTime)||!divergence||divergence.evaluatedAt!==row.closeTime||typeof row.opened!=="boolean")continue;
-    const gate=divergenceGate(row.side,divergence);if(row.opened!==gate.allowed)continue;
-    seen.add(key);out.push({divergenceFeatureSchemaVersion:DIVERGENCE_FEATURE_SCHEMA_VERSION,closeTime:row.closeTime,side:row.side,opened:row.opened,gate,divergence,consensus:row.consensus&&typeof row.consensus==="object"?structuredClone(row.consensus):null,macro:row.macro&&typeof row.macro==="object"?structuredClone(row.macro):null,setupClass:["strong","flexible-confirmed","weak-with-fresh-macro"].includes(row.setupClass)?row.setupClass:"strong"});if(out.length===100)break;
+    const gate=divergenceGate(row.side,divergence),contextRejected=row.decisionReason==="directional-context-penalty"&&row.opened===false
+      &&row.directionalContext?.eligible===true&&row.directionalContext?.alignment==="opposed"&&finite(row.directionalContext?.penalty)&&row.directionalContext.penalty>0
+      &&finite(row.decisionScore?.raw)&&finite(row.decisionScore?.effective)&&Math.abs(row.decisionScore.raw-row.directionalContext.penalty-row.decisionScore.effective)<EPS;
+    if(!contextRejected&&row.opened!==gate.allowed)continue;
+    seen.add(key);out.push({divergenceFeatureSchemaVersion:DIVERGENCE_FEATURE_SCHEMA_VERSION,closeTime:row.closeTime,side:row.side,opened:row.opened,gate,divergence,consensus:row.consensus&&typeof row.consensus==="object"?structuredClone(row.consensus):null,macro:row.macro&&typeof row.macro==="object"?structuredClone(row.macro):null,directionalContext:row.directionalContext&&typeof row.directionalContext==="object"?structuredClone(row.directionalContext):null,decisionScore:row.decisionScore&&typeof row.decisionScore==="object"?structuredClone(row.decisionScore):null,decisionReason:contextRejected?"directional-context-penalty":null,setupClass:["strong","flexible-confirmed","weak-with-fresh-macro"].includes(row.setupClass)?row.setupClass:"strong"});if(out.length===100)break;
   }return out;
 }
 
@@ -305,8 +308,18 @@ function validInputs(currentByTf,rowsByTf){
   return TIMEFRAMES.every(tf=>{const x=currentByTf[tf];return x&&finite(x.long)&&finite(x.short)&&finite(x.close)&&finite(x.closeTime)&&x.closeTime<=exec.closeTime&&exec.closeTime-x.closeTime<=CONTEXT_MAX_AGE[tf];})&&rowsByTf["1m"].every(isValidCandle);
 }
 function macroEligible(macro,decisionTime){const available=macro?.availableFrom??macro?.observedAt??macro?.updatedAt;return finite(macro?.score)&&macro.score>=ENTRY_TIERS.macro.macroScore&&macro.stale===false&&finite(available)&&available<=decisionTime&&decisionTime-available<=MACRO_MAX_AGE;}
+function directionalContextAt(context,side,decisionTime){
+  const available=context?.availableFrom??context?.observedAt,asOf=context?.asOf;
+  const eligible=context?.schemaVersion===1&&context.stale===false&&["bullish","bearish","neutral"].includes(context.direction)
+    &&finite(context.confidence)&&finite(available)&&available<=decisionTime&&finite(context.expiresAt)&&decisionTime<context.expiresAt
+    &&finite(asOf)&&asOf<=decisionTime;
+  if(!eligible)return{eligible:false,direction:null,confidence:null,alignment:"unavailable",penalty:0,asOf:null,observedAt:finite(available)?available:null,expiresAt:finite(context?.expiresAt)?context.expiresAt:null};
+  const expected=side==="long"?"bullish":"bearish",alignment=context.direction==="neutral"?"neutral":context.direction===expected?"confirmed":"opposed";
+  const penalty=alignment==="opposed"&&context.confidence>=60?Math.min(5,2+Math.floor((context.confidence-60)/10)):0;
+  return{eligible:true,direction:context.direction,confidence:context.confidence,alignment,penalty,asOf,observedAt:available,expiresAt:context.expiresAt,source:context.source||null};
+}
 
-export function processSimulator(sim,currentByTf,rowsByTf,{macroSnapshot}={}) {
+export function processSimulator(sim,currentByTf,rowsByTf,{macroSnapshot,directionalContext}={}) {
   if(!validInputs(currentByTf,rowsByTf))return{invalidData:true};
   const candle=rowsByTf["1m"].at(-1),market=currentByTf["1m"];
   if(sim.lastProcessedCloseTime===candle.closeTime)return{duplicate:true};
@@ -319,12 +332,19 @@ export function processSimulator(sim,currentByTf,rowsByTf,{macroSnapshot}={}) {
     const qualifies=(score,agreement)=>(score>=ENTRY_TIERS.normal.score&&agreement>=ENTRY_TIERS.normal.agreement)
       ||(score>=ENTRY_TIERS.flexible.score&&agreement>=ENTRY_TIERS.flexible.agreement)
       ||(eligibleMacro&&score>=ENTRY_TIERS.macro.score&&agreement>=ENTRY_TIERS.macro.agreement);
-    const long=qualifies(c.long,c.agreementLong),short=qualifies(c.short,c.agreementShort);
-    if(long||short){const side=long?"long":"short",divergence=analyzePriceVolumeDivergence(rowsByTf["1m"]),gate=divergenceGate(side,divergence);
+    const longContext=directionalContextAt(directionalContext,"long",candle.closeTime),shortContext=directionalContextAt(directionalContext,"short",candle.closeTime);
+    const rawLong=qualifies(c.long,c.agreementLong),rawShort=qualifies(c.short,c.agreementShort);
+    const long=qualifies(c.long-longContext.penalty,c.agreementLong),short=qualifies(c.short-shortContext.penalty,c.agreementShort);
+    if((rawLong||rawShort)&&!long&&!short){const side=rawLong?"long":"short",context=side==="long"?longContext:shortContext,score=side==="long"?c.long:c.short;
+      const divergence=analyzePriceVolumeDivergence(rowsByTf["1m"]),gate=divergenceGate(side,divergence),agreement=side==="long"?c.agreementLong:c.agreementShort;
+      const setupClass=score>=ENTRY_TIERS.normal.score&&agreement>=ENTRY_TIERS.normal.agreement?"strong":score>=ENTRY_TIERS.flexible.score&&agreement>=ENTRY_TIERS.flexible.agreement?"flexible-confirmed":"weak-with-fresh-macro";
+      const snapshot={divergenceFeatureSchemaVersion:DIVERGENCE_FEATURE_SCHEMA_VERSION,closeTime:candle.closeTime,side,opened:false,gate,divergence,consensus:{...c},macro:{eligible:eligibleMacro,score:finite(macroSnapshot?.score)?macroSnapshot.score:null},directionalContext:context,decisionScore:{raw:score,effective:score-context.penalty},decisionReason:"directional-context-penalty",setupClass};
+      sim.decisionSnapshots=canonicalDecisionSnapshots([snapshot,...(sim.decisionSnapshots||[])]);return{opened:false,blocked:true,directionalContext:context};}
+    if(long||short){const side=long?"long":"short",context=side==="long"?longContext:shortContext,divergence=analyzePriceVolumeDivergence(rowsByTf["1m"]),gate=divergenceGate(side,divergence);
       const score=side==="long"?c.long:c.short,agreement=side==="long"?c.agreementLong:c.agreementShort;
       const setupClass=score>=ENTRY_TIERS.normal.score&&agreement>=ENTRY_TIERS.normal.agreement?"strong"
         :score>=ENTRY_TIERS.flexible.score&&agreement>=ENTRY_TIERS.flexible.agreement?"flexible-confirmed":"weak-with-fresh-macro";
-      const snapshot={divergenceFeatureSchemaVersion:DIVERGENCE_FEATURE_SCHEMA_VERSION,closeTime:candle.closeTime,side,opened:gate.allowed,gate,divergence,consensus:{...c},macro:{eligible:eligibleMacro,score:finite(macroSnapshot?.score)?macroSnapshot.score:null},setupClass};
+      const snapshot={divergenceFeatureSchemaVersion:DIVERGENCE_FEATURE_SCHEMA_VERSION,closeTime:candle.closeTime,side,opened:gate.allowed,gate,divergence,consensus:{...c},macro:{eligible:eligibleMacro,score:finite(macroSnapshot?.score)?macroSnapshot.score:null},directionalContext:context,decisionScore:{raw:score,effective:score-context.penalty},decisionReason:null,setupClass};
       sim.decisionSnapshots=canonicalDecisionSnapshots([snapshot,...(sim.decisionSnapshots||[])]);
       if(gate.allowed)openBasket(sim,side,market,candle,structuredClone(snapshot));
       return{opened:gate.allowed,blocked:!gate.allowed,divergence:gate};}

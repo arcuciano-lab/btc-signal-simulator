@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { calculateCandleBodyGeometry, calculateCandlePriceDomain, projectPriceLevel, selectVisibleCandles } from "../price-chart.js";
+import { calculateCandleBodyGeometry, calculateCandlePriceDomain, selectVisibleCandles } from "../price-chart.js";
 
 test("selectVisibleCandles returns exactly the latest 120 candles", () => {
   const rows = Array.from({ length: 200 }, (_, index) => ({ index }));
@@ -44,11 +44,4 @@ test("price domain uses compact four-percent padding without excluding candle ex
 test("small candle bodies remain centered and readable", () => {
   assert.deepEqual(calculateCandleBodyGeometry(50, 50.5, 2), { top: 49.25, height: 2 });
   assert.equal(calculateCandleBodyGeometry(Number.NaN, 50), null);
-});
-
-test("trade levels project safely without changing the price domain", () => {
-  assert.equal(projectPriceLevel(150, 100, 200, 100), 50);
-  assert.equal(projectPriceLevel(500, 100, 200, 100), 3);
-  assert.equal(projectPriceLevel(Number.NaN, 100, 200, 100), null);
-  assert.equal(projectPriceLevel(150, 200, 100, 100), null);
 });

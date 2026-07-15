@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
+import { calculateDirectionalContext, FOUR_HOURS, parseAlpacaBars } from "./market-context.js";
 
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 4173);
@@ -21,6 +22,9 @@ let newsCache = { items:[], oil:null, expiresAt:0 };
 let newsRequest = null;
 let macroCache = { items:[], updatedAt:0, expiresAt:0 };
 let macroRequest = null;
+let marketContextCache = null;
+let marketContextRequest = null;
+let marketContextRefreshAt = 0;
 const klineCache = new Map();
 const klineRequests = new Map();
 const mime = {
@@ -30,6 +34,33 @@ const mime = {
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml"
 };
+
+async function fetchMarketContext() {
+  const now = Date.now();
+  if (marketContextCache && marketContextRefreshAt > now) return marketContextCache;
+  if (marketContextRequest) return marketContextRequest;
+  marketContextRequest = (async () => {
+    try {
+      const end=new Date(now),start=new Date(now-7*24*60*60*1000),upstream=new URL("https://data.alpaca.markets/v1beta3/crypto/us/bars");
+      upstream.searchParams.set("symbols","BTC/USD");upstream.searchParams.set("timeframe","4Hour");upstream.searchParams.set("start",start.toISOString());upstream.searchParams.set("end",end.toISOString());upstream.searchParams.set("limit","43");upstream.searchParams.set("sort","asc");
+      const headers={},keyId=process.env.APCA_API_KEY_ID,secretKey=process.env.APCA_API_SECRET_KEY;
+      if(keyId&&secretKey){headers["APCA-API-KEY-ID"]=keyId;headers["APCA-API-SECRET-KEY"]=secretKey;}
+      const response = await fetch(upstream, { headers, signal:AbortSignal.timeout(12000) });
+      if (!response.ok) throw new Error(`Proveedor de contexto: ${response.status}`);
+      const context = calculateDirectionalContext(parseAlpacaBars(await response.json()), Date.now(), "Alpaca Market Data");
+      if (!context) throw new Error("Datos insuficientes para contexto direccional");
+      const sameCandle=marketContextCache?.asOf===context.asOf;
+      marketContextCache = sameCandle ? marketContextCache : context;
+      marketContextRefreshAt = context.expiresAt > now ? context.expiresAt : now + 60 * 1000;
+      return marketContextCache;
+    } catch {
+      if (marketContextCache) return { ...marketContextCache, stale:true, expiresAt:marketContextCache.expiresAt };
+      return { schemaVersion:1, direction:"neutral", confidence:0, asOf:null, observedAt:now, availableFrom:now,
+        expiresAt:now + FOUR_HOURS, stale:true, unavailable:true, metrics:null, source:"Alpaca Market Data" };
+    }
+  })();
+  try { return await marketContextRequest; } finally { marketContextRequest = null; }
+}
 
 function send(res, status, body, type = "application/json; charset=utf-8", cacheControl = "no-store") {
   res.writeHead(status, { "content-type": type, "cache-control": cacheControl });
@@ -209,6 +240,7 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, JSON.stringify(await fetchNews()));
     }
     if (url.pathname === "/api/macro-calendar") return send(res, 200, JSON.stringify(await fetchEconomicCalendar()));
+    if (url.pathname === "/api/market-context") return send(res, 200, JSON.stringify(await fetchMarketContext()));
     if (url.pathname === "/api/klines") {
       const interval = url.searchParams.get("interval") || "1h";
       const requestedLimit = Number(url.searchParams.get("limit"));
@@ -253,6 +285,9 @@ export function resetServerState() {
   newsRequest = null;
   macroCache = { items:[], updatedAt:0, expiresAt:0 };
   macroRequest = null;
+  marketContextCache = null;
+  marketContextRequest = null;
+  marketContextRefreshAt = 0;
   klineCache.clear();
   klineRequests.clear();
 }

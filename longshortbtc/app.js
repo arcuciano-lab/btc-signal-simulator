@@ -2,7 +2,8 @@ import { analyze } from "./strategy.js";
 import { calculateMacroImpact, classifyMacroEventScore, scoreMacroEvent } from "./macro-impact.js";
 import { createSimulator, getConsensus, getMarkToMarket, isValidCandle, migrateSimulator, processSimulator as updateSimulator, TIMEFRAMES } from "./simulator.js";
 import { buildInstitutionalReport, buildPatternEvidence, validatePattern } from "./institutional-intelligence.js";
-import { calculateCandleBodyGeometry, calculateCandlePriceDomain, projectPriceLevel, selectVisibleCandles } from "./price-chart.js";
+import { buildActiveTradePanel } from "./active-trade-panel.js";
+import { calculateCandleBodyGeometry, calculateCandlePriceDomain, selectVisibleCandles } from "./price-chart.js";
 import { formatVolumeRatio, formatWinRate, getVolumeConfirmationLabel } from "./dashboard-format.js";
 const SIM_KEY = "btc-signal-simulator-v6";
 // Legacy leverageReason payloads are intentionally ignored by the v6 reset.
@@ -108,6 +109,7 @@ const state = {
   rowsByTf: {},
   loading: false,
   macroSnapshot: { score: null, source: null, stale: true, observedAt: null, asOf: null, availableFrom: null, updatedAt: null, calculatedAt: null },
+  directionalContext: null,
   chartIndicators: loadChartPreferences(),
   simulator: loadSimulator()
 };
@@ -195,7 +197,7 @@ function consensus() {
 }
 
 function processSimulator() {
-  updateSimulator(state.simulator, state.currentByTf, state.rowsByTf, { macroSnapshot: state.macroSnapshot });
+  updateSimulator(state.simulator, state.currentByTf, state.rowsByTf, { macroSnapshot: state.macroSnapshot, directionalContext:state.directionalContext });
   saveSimulator();
 }
 
@@ -275,6 +277,13 @@ function renderSimulator() {
     const market = state.currentByTf["1m"];
     const patterns = buildPatternEvidence(state.rowsByTf["1m"]).map(candidate => validatePattern(candidate, sim.trades));
     report.textContent = buildInstitutionalReport({ market, simulator: sim, macroSnapshot: state.macroSnapshot, patterns });
+  }
+  const tradePanel = $("activeTradePanel");
+  if (tradePanel) {
+    const market = state.currentByTf["1m"];
+    const panel = buildActiveTradePanel(sim.position, { markPrice: market?.close, equity: mark.equity });
+    tradePanel.textContent = panel.text;
+    tradePanel.className = `active-trade-panel ${panel.tone}`;
   }
   const status = $("institutionalStatus");
   if (status) status.textContent = sim.riskControl?.halted ? "RISK HALT" : `RECENT ${Math.min(sim.trades.length, 100)}/100 · TOTAL ${Math.min(sim.trades.length, 1000)}/1000`;
@@ -374,28 +383,6 @@ function drawPriceChart(rows) {
   });
   const last=rows.at(-1),lastY=y(last.close);ctx.setLineDash([2,3]);ctx.strokeStyle=last.close>=last.open?"#00f5a088":"#ff356788";ctx.beginPath();ctx.moveTo(0,lastY);ctx.lineTo(plotW,lastY);ctx.stroke();ctx.setLineDash([]);const priceLabel=number(last.close,1),labelW=64;ctx.fillStyle=last.close>=last.open?"#00b979":"#d82955";ctx.fillRect(plotW+3,clamp(lastY-9,0,chartH-18),labelW,18);ctx.fillStyle="#fff";ctx.font="500 8px DM Mono, monospace";ctx.fillText(priceLabel,plotW+7,clamp(lastY+3,12,chartH-5));
   const timeStep=Math.max(1,Math.floor(rows.length/6));ctx.fillStyle="#65727c";ctx.font="8px DM Mono, monospace";rows.forEach((r,i)=>{if(i%timeStep!==0&&i!==rows.length-1)return;const x=(i+.5)*slot;ctx.fillText(new Date(r.closeTime).toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}),clamp(x-16,0,plotW-34),H-5)});
-  drawOpenTradeLine(ctx,rows,min,max,plotW,chartH,slot);
-}
-
-function drawOpenTradeLine(ctx,rows,min,max,W,H,slot){
-  const trade=state.simulator.position;if(!trade)return;
-  const projectLevel=value=>projectPriceLevel(value,min,max,H);
-  const color=trade.side==="long"?"#00f5a0":"#ff3567",lineY=projectLevel(trade.weightedAverage),riskY=projectLevel(trade.riskBoundary),liquidationY=projectLevel(trade.liquidationBoundary);
-  if([lineY,riskY,liquidationY].some(value=>value===null))return;
-  const entryIndex=rows.findIndex(r=>r.closeTime>=trade.entryTime),startX=entryIndex>=0?(entryIndex+.5)*slot:0;
-  ctx.save();
-  ctx.fillStyle="#ff35670d";ctx.fillRect(startX,Math.min(lineY,riskY),W-startX,Math.abs(riskY-lineY));
-  drawTradeLevel(ctx,startX,W,riskY,"#ff3567",`HARD BASKET RISK ? ${money(trade.riskBoundary)} ? NO ORDINARY SL`,[3,5],1);
-  drawTradeLevel(ctx,startX,W,liquidationY,"#a855f7",`MODELED CROSS-MARGIN LIQUIDATION ? ${money(trade.liquidationBoundary)}`,[2,6],1);
-  drawTradeLevel(ctx,startX,W,lineY,color,`SIM ${trade.side.toUpperCase()} ? WEIGHTED AVG ${money(trade.weightedAverage)} ? FIXED 10x`,[8,5],1.6,true);
-  trade.legs.forEach(leg=>{const y=projectLevel(leg.fillPrice);if(y===null)return;drawTradeLevel(ctx,startX,W,y,"#00d9ff",`LEG ${leg.index} ? ${number(leg.marginFraction*100,0)}% ? ${money(leg.fillPrice)}`,[2,5],1)});
-  (trade.structuralPartials||[]).forEach(plan=>{const py=projectLevel(plan.level);if(py===null)return;drawTradeLevel(ctx,startX,W,py,plan.executed?"#71808b":"#ffcc00",`${plan.executed?"FILLED":"PARTIAL 25%"} ? ${plan.reason} ? ${money(plan.level)}`,[2,4],1)});
-  ctx.restore();
-}
-
-function drawTradeLevel(ctx,startX,endX,y,color,label,dash,width,boxed=false){
-  ctx.strokeStyle=color;ctx.lineWidth=width;ctx.setLineDash(dash);ctx.shadowColor=color;ctx.shadowBlur=boxed?11:7;ctx.beginPath();ctx.moveTo(startX,y);ctx.lineTo(endX,y);ctx.stroke();ctx.setLineDash([]);ctx.shadowBlur=0;ctx.font=`500 ${boxed?9:8}px DM Mono, monospace`;
-  const labelW=ctx.measureText(label).width+14,labelX=clamp(startX+7,4,endX-labelW-4),labelY=clamp(y-(boxed?22:18),3,Math.max(3,ctx.canvas.getBoundingClientRect().height-18));ctx.fillStyle="#030506e8";ctx.fillRect(labelX,labelY,labelW,16);if(boxed){ctx.strokeStyle=color;ctx.strokeRect(labelX,labelY,labelW,16)}ctx.fillStyle=color;ctx.fillText(label,labelX+7,labelY+11);
 }
 
 function drawVolumeChart(rows){
@@ -438,6 +425,13 @@ document.querySelectorAll("[data-chart-toggle]").forEach(btn=>btn.addEventListen
 window.addEventListener("resize",()=>{if(state.lastResize)clearTimeout(state.lastResize);state.lastResize=setTimeout(()=>state.lastRows&&drawCharts(state.lastRows.slice(-VISIBLE_CANDLE_COUNT)),150)});
 setInterval(() => load(state.tf, true), 60_000);
 setInterval(loadMacroTicker, 15 * 60_000);
+async function loadDirectionalContext() {
+  try { const response=await fetch("/api/market-context");state.directionalContext=response.ok?await response.json():null; }
+  catch { state.directionalContext=null; }
+}
+// Poll cheaply; the server publishes at most one canonical snapshot per completed 4h candle.
+setInterval(loadDirectionalContext, 5 * 60_000);
+loadDirectionalContext();
 loadMacroTicker();
 load(state.tf);
 
